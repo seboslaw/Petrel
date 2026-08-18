@@ -113,6 +113,14 @@ public actor ATProtoClient {
     /// Whether the client is operating in gateway mode (all requests go through gateway)
     private let isGatewayMode: Bool
 
+    /// Whether `initializeFromStoredAccount()` may refresh a near-expiry token at
+    /// startup. App extensions pass false: a Notification Service Extension is
+    /// reaped seconds after delivering its content, and a rotation whose
+    /// successor never reaches shared storage permanently kills the session —
+    /// the AS treats the inevitable replay of the consumed token as theft and
+    /// revokes the token family (Skeets SESSION_REVIEW_2.md F21, 2026-08-18).
+    private let startupTokenRefresh: Bool
+
     /// The authentication mode.
     public let authMode: AuthMode
 
@@ -130,6 +138,7 @@ public actor ATProtoClient {
     ) async {
         authMode = .none
         isGatewayMode = false
+        startupTokenRefresh = true
         authManager = nil
         accountManager = nil
         storage = nil
@@ -172,12 +181,14 @@ public actor ATProtoClient {
         didResolver: (any DIDResolving)? = nil,
         bskyAppViewDID: String = "did:web:api.bsky.app#bsky_appview",
         bskyChatDID: String = "did:web:api.bsky.chat#bsky_chat",
-        accessGroup: String? = nil
+        accessGroup: String? = nil,
+        startupTokenRefresh: Bool = true
     ) async throws {
         // Initialize storage first — use locals then assign to optional properties
         let theStorage = KeychainStorage(namespace: namespace, accessGroup: accessGroup)
         storage = theStorage
         self.oauthConfig = oauthConfig
+        self.startupTokenRefresh = startupTokenRefresh
         self.authMode = authMode
 
         // Initialize account manager
@@ -297,8 +308,9 @@ public actor ATProtoClient {
             await networkService.setServiceDID(account.bskyAppViewDID, for: "app.bsky")
             await networkService.setServiceDID(account.bskyChatDID, for: "chat.bsky")
 
-            // Check if tokens need refreshing
-            if let authManager {
+            // Check if tokens need refreshing. Skipped when `startupTokenRefresh`
+            // is false (app extensions) — see the property doc.
+            if startupTokenRefresh, let authManager {
                 do {
                     _ = try await authManager.refreshTokenIfNeeded()
                 } catch let error as AuthError where error == .dpopKeyError {

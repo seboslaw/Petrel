@@ -611,6 +611,9 @@ actor CABOAuthStrategy: AuthStrategy {
             throw AuthError.networkError(error)
         }
 
+        LogManager.logError(
+            "ROTATION_TRACE 2/4 token endpoint answered status=\(response.statusCode) did=\(LogManager.logDID(account.did))"
+        )
         if (200 ..< 300).contains(response.statusCode) {
             let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
             let newSession = Session(
@@ -621,9 +624,19 @@ actor CABOAuthStrategy: AuthStrategy {
                 tokenType: session.tokenType,
                 did: account.did
             )
+            // A "3/4" without its "4/4" means the successor token WAS in this
+            // process when it died — persist-on-receipt (F21.3) would have saved
+            // the session. A "1/4" with no "2/4" means the exchange was still in
+            // flight — no persistence fix can help that case.
+            LogManager.logError(
+                "ROTATION_TRACE 3/4 new token pair decoded in-process — persisting did=\(LogManager.logDID(account.did))"
+            )
             // The server has rotated the refresh token; persistence failures are handled
             // inside (retry + pending key + in-memory) and must not fail the refresh.
             await core.persistRefreshedSession(newSession, for: account)
+            LogManager.logError(
+                "ROTATION_TRACE 4/4 persist call returned did=\(LogManager.logDID(account.did))"
+            )
             await core.refreshCircuitBreaker.recordSuccess(for: account.did)
             return .refreshedSuccessfully
         }
@@ -681,6 +694,13 @@ actor CABOAuthStrategy: AuthStrategy {
         )
         request.setValue(proof, forHTTPHeaderField: "DPoP")
 
+        // ROTATION_TRACE (Skeets SESSION_REVIEW_2.md F21.3 experiment): four
+        // error-level breadcrumbs bracket every rotation so a device log pull
+        // shows exactly where a reaped process lost one. Deliberately logError —
+        // info-level does not persist on device.
+        LogManager.logError(
+            "ROTATION_TRACE 1/4 token-endpoint POST attempt=1 (token may be consumed from here) did=\(LogManager.logDID(did))"
+        )
         let networkService = core.networkService
         let (data, response) = try await networkService.request(request, skipTokenRefresh: true)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -704,6 +724,9 @@ actor CABOAuthStrategy: AuthStrategy {
                 var retryRequest = request
                 retryRequest.setValue(retryProof, forHTTPHeaderField: "DPoP")
 
+                LogManager.logError(
+                    "ROTATION_TRACE 1/4 token-endpoint POST attempt=2 (nonce retry — consuming attempt) did=\(LogManager.logDID(did))"
+                )
                 let (retryData, retryResponse) = try await networkService.request(retryRequest, skipTokenRefresh: true)
                 guard let retryHttpResponse = retryResponse as? HTTPURLResponse else {
                     throw AuthError.invalidResponse
