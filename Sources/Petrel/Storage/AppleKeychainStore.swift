@@ -73,50 +73,53 @@
             .merging(Self.platformSpecificAttributes()) { _, new in new }
             .merging(Self.accessGroupAttributes(accessGroup)) { _, new in new }
 
-            var addQuery = searchQuery
-            addQuery[kSecValueData as String] = value
-            addQuery[kSecAttrAccessible as String] = Self.defaultAccessibility
-
-            // Delete any existing item with the same key
-            let deleteStatus = SecItemDelete(searchQuery as CFDictionary)
-            if deleteStatus != errSecSuccess, deleteStatus != errSecItemNotFound {
-                LogManager.logError(
-                    "AppleKeychainStore - Failed to delete existing item for key \(namespacedKey). Status: \(deleteStatus)"
-                )
-                throw KeychainError.itemStoreError(status: Int(deleteStatus))
-            }
-
-            // Add the new item to the keychain
-            let status = SecItemAdd(addQuery as CFDictionary, nil)
-            if status == errSecDuplicateItem {
-                // Cross-process race or an item the delete could not match:
-                // update in place, migrating value and accessibility.
-                let updateAttributes: [String: Any] = [
-                    kSecValueData as String: value,
-                    kSecAttrAccessible as String: Self.defaultAccessibility,
-                ]
-                let updateStatus = SecItemUpdate(
-                    searchQuery as CFDictionary, updateAttributes as CFDictionary
-                )
-                guard updateStatus == errSecSuccess else {
+            // Update-FIRST (Skeets SESSION_REVIEW_2.md F14): the previous
+            // delete-then-add left a window in which a concurrent reader in
+            // another process observed "no item" — for single-use OAuth tokens a
+            // torn read is a future replay. SecItemUpdate replaces the value in
+            // place with no window; the add path only runs when no item exists.
+            let updateAttributes: [String: Any] = [
+                kSecValueData as String: value,
+                kSecAttrAccessible as String: Self.defaultAccessibility,
+            ]
+            let updateStatus = SecItemUpdate(
+                searchQuery as CFDictionary, updateAttributes as CFDictionary
+            )
+            if updateStatus == errSecItemNotFound {
+                var addQuery = searchQuery
+                addQuery[kSecValueData as String] = value
+                addQuery[kSecAttrAccessible as String] = Self.defaultAccessibility
+                let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+                guard addStatus == errSecSuccess else {
                     LogManager.logError(
-                        "AppleKeychainStore - Duplicate item for key \(namespacedKey); update fallback failed. Status: \(updateStatus)"
+                        "AppleKeychainStore - Failed to store item for key \(namespacedKey). Status: \(addStatus)"
                     )
-                    throw KeychainError.itemStoreError(status: Int(updateStatus))
+                    throw KeychainError.itemStoreError(status: Int(addStatus))
                 }
-                LogManager.logDebug(
-                    "AppleKeychainStore - Updated existing item for key \(namespacedKey) after duplicate add."
-                )
-                return
-            }
-            guard status == errSecSuccess else {
+            } else if updateStatus != errSecSuccess {
                 LogManager.logError(
-                    "AppleKeychainStore - Failed to store item for key \(namespacedKey). Status: \(status)"
+                    "AppleKeychainStore - Failed to update item for key \(namespacedKey). Status: \(updateStatus)"
                 )
-                throw KeychainError.itemStoreError(status: Int(status))
+                throw KeychainError.itemStoreError(status: Int(updateStatus))
             }
 
-            LogManager.logDebug("AppleKeychainStore - Successfully stored item for key \(namespacedKey).")
+            // Read-back verification (F24 hardening): a write that "succeeded"
+            // into a location subsequent reads cannot see is exactly how a
+            // session dies silently — catch the lie at the source, with the
+            // status that names the store's answer.
+            var verifyQuery = searchQuery
+            verifyQuery[kSecReturnData as String] = kCFBooleanTrue!
+            verifyQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+            var verifyItem: CFTypeRef?
+            let verifyStatus = SecItemCopyMatching(verifyQuery as CFDictionary, &verifyItem)
+            guard verifyStatus == errSecSuccess, (verifyItem as? Data) == value else {
+                LogManager.logError(
+                    "AppleKeychainStore - POST-STORE VERIFY FAILED for key \(namespacedKey): status=\(verifyStatus) dataMatch=\((verifyItem as? Data) == value)"
+                )
+                throw KeychainError.itemStoreError(status: Int(verifyStatus))
+            }
+
+            LogManager.logDebug("AppleKeychainStore - Stored and verified item for key \(namespacedKey).")
         }
 
         func retrieve(key: String, namespace: String, accessGroup: String?) throws -> Data {
