@@ -114,11 +114,11 @@ public actor ATProtoClient {
     private let isGatewayMode: Bool
 
     /// Whether `initializeFromStoredAccount()` may refresh a near-expiry token at
-    /// startup. App extensions pass false: a Notification Service Extension is
-    /// reaped seconds after delivering its content, and a rotation whose
-    /// successor never reaches shared storage permanently kills the session —
-    /// the AS treats the inevitable replay of the consumed token as theft and
-    /// revokes the token family (Skeets SESSION_REVIEW_2.md F21, 2026-08-18).
+    /// startup. App extensions should pass false: a Notification Service
+    /// Extension is reaped seconds after delivering its content, and a rotation
+    /// whose successor never reaches shared storage permanently kills the
+    /// session — the authorization server treats the inevitable replay of the
+    /// consumed token as theft and revokes the whole token family.
     private let startupTokenRefresh: Bool
 
     /// The authentication mode.
@@ -342,8 +342,8 @@ public actor ATProtoClient {
     }
 
     /// Awaitable variant of `applicationDidBecomeActive()` for callers that read
-    /// auth state right after the validation (Skeets SESSION_REVIEW_2.md F16) —
-    /// the fire-and-forget original races its own verdict.
+    /// auth state right after the validation — the fire-and-forget original
+    /// races its own verdict.
     public func applicationDidBecomeActiveAndWait() async {
         await validateAuthenticationState()
     }

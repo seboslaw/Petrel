@@ -286,9 +286,9 @@ actor CABOAuthStrategy: AuthStrategy {
         switch result {
         case .refreshedSuccessfully, .stillValid:
             // .stillValid after a 401 means another process already rotated (or
-            // the invalid_grant rescue fired): storage holds a fresh token this
-            // request never used. Retry once with it instead of failing a
-            // healthy session (Skeets SESSION_REVIEW_2.md F12).
+            // the invalid_grant rescue below fired): storage holds a fresh token
+            // this request never used. Retry once with it instead of failing a
+            // healthy session.
             let (newReq, _) = try await core.prepareAuthenticatedRequestWithContext(request)
             let networkService = core.networkService
             let result = try await networkService.request(newReq)
@@ -629,9 +629,10 @@ actor CABOAuthStrategy: AuthStrategy {
                 did: account.did
             )
             // A "3/4" without its "4/4" means the successor token WAS in this
-            // process when it died — persist-on-receipt (F21.3) would have saved
-            // the session. A "1/4" with no "2/4" means the exchange was still in
-            // flight — no persistence fix can help that case.
+            // process when it died — faster persistence would have saved the
+            // session. A "1/4" with no "2/4" means the exchange was still in
+            // flight when the process ended — no persistence fix can help that
+            // case.
             LogManager.logError(
                 "ROTATION_TRACE 3/4 new token pair decoded in-process — persisting did=\(LogManager.logDID(account.did))"
             )
@@ -651,10 +652,11 @@ actor CABOAuthStrategy: AuthStrategy {
            let errorResponse = try? JSONDecoder().decode(OAuthErrorResponse.self, from: data),
            errorResponse.error == "invalid_grant"
         {
-            // Rescue (Skeets SESSION_REVIEW_2.md F22/F23): if storage now holds a
-            // DIFFERENT refresh token than the one this attempt used, another
-            // process won a concurrent rotation — the session is alive and the
-            // invalid_grant only condemns our stale copy. Report health, not death.
+            // Rescue: if storage now holds a DIFFERENT refresh token than the
+            // one this attempt used, another process (e.g. a notification
+            // extension) won a concurrent rotation — the session is alive and
+            // the invalid_grant only condemns our stale copy. Report health,
+            // not death.
             if let stored = try? await core.storage.getSession(for: account.did),
                let storedRefresh = stored.refreshToken,
                storedRefresh != session.refreshToken
@@ -671,11 +673,12 @@ actor CABOAuthStrategy: AuthStrategy {
             )
             await core.refreshCircuitBreaker.recordFailure(for: account.did, kind: .invalidGrant)
 
-            // Truthful death (F22): the family is dead server-side — leave local
-            // storage agreeing with the event so every storage-based check
-            // (persistedSessionState & co.) reaches the same verdict. Same steps
-            // as logout() minus the pointless revocation of a dead token; the
-            // account record survives for login prefill, only the pointer clears.
+            // Truthful death: the token family is dead server-side — leave local
+            // storage agreeing with the broadcast event so storage-based checks
+            // reach the same verdict the app was just told. Same steps as
+            // logout() minus the pointless revocation of a dead token; the
+            // account record survives for login prefill, only the current
+            // pointer clears.
             try? await core.storage.deleteSession(for: account.did)
             try? await core.storage.deleteDPoPKey(for: account.did)
             try? await core.storage.saveDPoPNonces([:], for: account.did)
@@ -734,10 +737,11 @@ actor CABOAuthStrategy: AuthStrategy {
         )
         request.setValue(proof, forHTTPHeaderField: "DPoP")
 
-        // ROTATION_TRACE (Skeets SESSION_REVIEW_2.md F21.3 experiment): four
-        // error-level breadcrumbs bracket every rotation so a device log pull
-        // shows exactly where a reaped process lost one. Deliberately logError —
-        // info-level does not persist on device.
+        // ROTATION_TRACE: four error-level breadcrumbs bracket every rotation
+        // so a device log pull shows exactly where an interrupted process lost
+        // one (refresh tokens are single-use: a rotation that is consumed
+        // server-side but never persisted client-side strands the session).
+        // Deliberately logError — info-level does not persist on device.
         LogManager.logError(
             "ROTATION_TRACE 1/4 token-endpoint POST attempt=1 (token may be consumed from here) did=\(LogManager.logDID(did))"
         )

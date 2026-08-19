@@ -1438,11 +1438,12 @@ public actor NetworkService: NetworkServiceProtocol {
                             LogManager.logError(
                                 "Network Service - authProvider failed to handle non-nonce 401: \(error). Giving up."
                             )
-                            // NO auto-logout broadcast here (Skeets SESSION_REVIEW_2.md
-                            // F11/F22): this catch also fires for plain network errors,
-                            // rate-limit skips and an open circuit breaker — none of which
-                            // mean the session is dead. The DEFINITIVE verdict is emitted
-                            // by the strategy itself (RefreshInvalidGrant → the
+                            // NO auto-logout broadcast here: this catch also fires for
+                            // plain network errors, rate-limit skips and an open circuit
+                            // breaker — none of which mean the session is dead, and an
+                            // app treating this event as definitive logs users out over
+                            // a network blip. The definitive verdict is emitted by the
+                            // auth strategy itself (RefreshInvalidGrant → the
                             // refreshTokenInvalid event) exactly when the server rejects
                             // the grant; the UI must not learn "death" from anywhere else.
                             throw NetworkError.authenticationRequired // Throw if handling fails
@@ -1453,8 +1454,9 @@ public actor NetworkService: NetworkServiceProtocol {
                             "Network Service - Received non-nonce 401 but skipping refresh for \(url.absoluteString). Cannot proceed."
                         )
                         // No auto-logout broadcast: with skipTokenRefresh the caller
-                        // (e.g. the no-rotation push extension) EXPECTS auth failures on
-                        // a stale token; they are degradation, not death (F11/F21).
+                        // (e.g. a push extension configured never to rotate) EXPECTS
+                        // auth failures on a stale token; they are degradation, not
+                        // death.
                         throw NetworkError.authenticationRequired // Cannot handle this 401
                     }
 

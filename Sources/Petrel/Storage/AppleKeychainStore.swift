@@ -73,11 +73,12 @@
             .merging(Self.platformSpecificAttributes()) { _, new in new }
             .merging(Self.accessGroupAttributes(accessGroup)) { _, new in new }
 
-            // Update-FIRST (Skeets SESSION_REVIEW_2.md F14): the previous
-            // delete-then-add left a window in which a concurrent reader in
-            // another process observed "no item" — for single-use OAuth tokens a
-            // torn read is a future replay. SecItemUpdate replaces the value in
-            // place with no window; the add path only runs when no item exists.
+            // Update-FIRST: delete-then-add left a window in which a concurrent
+            // reader in another process (app vs. extension sharing an access
+            // group) observed "no item" — for single-use OAuth refresh tokens a
+            // torn read becomes a replayed token later. SecItemUpdate replaces
+            // the value in place with no window; the add path only runs when no
+            // item exists yet.
             let updateAttributes: [String: Any] = [
                 kSecValueData as String: value,
                 kSecAttrAccessible as String: Self.defaultAccessibility,
@@ -103,10 +104,11 @@
                 throw KeychainError.itemStoreError(status: Int(updateStatus))
             }
 
-            // Read-back verification (F24 hardening): a write that "succeeded"
-            // into a location subsequent reads cannot see is exactly how a
-            // session dies silently — catch the lie at the source, with the
-            // status that names the store's answer.
+            // Read-back verification: a write that "succeeded" into a location
+            // subsequent reads cannot see (access-group/keychain ambiguity,
+            // notably on iOS-app-on-Mac) is how a session dies silently much
+            // later — catch the lie at the source, with the status that names
+            // the store's answer.
             var verifyQuery = searchQuery
             verifyQuery[kSecReturnData as String] = kCFBooleanTrue!
             verifyQuery[kSecMatchLimit as String] = kSecMatchLimitOne
