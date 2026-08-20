@@ -38,7 +38,12 @@ actor RefreshFlightRegistry {
         for did: String,
         operation: @escaping @Sendable () async throws -> TokenRefreshResult
     ) async throws -> TokenRefreshResult {
-        if let flight = flights[did] { return try await flight.value }
+        if let flight = flights[did] {
+            LogManager.logError(
+                "ROTATION_TRACE joined in-flight exchange instead of starting a second one did=\(LogManager.logDID(did))"
+            )
+            return try await flight.value
+        }
         let flight = Task<TokenRefreshResult, Error> {
             // Deregistration belongs to the flight itself, not to the caller
             // that created it: a caller cancelled mid-await must not free the
@@ -687,6 +692,9 @@ actor OAuthCore {
         // preparation and now. Hand back the fresh session instead of consuming
         // another single-use refresh token.
         if let staleAccessToken, staleAccessToken != session.accessToken {
+            LogManager.logError(
+                "ROTATION_TRACE stale-401 short-circuit: access token already rotated — no exchange did=\(LogManager.logDID(did))"
+            )
             return .stillValid
         }
 
