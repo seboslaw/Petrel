@@ -1177,6 +1177,39 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
         self.didResolver = didResolver
     }
 
+    // MARK: - Acting account
+
+    /// The account this call authenticates as: the one pinned by
+    /// `PetrelActingAccount.did` if the caller bound it, otherwise the current account.
+    ///
+    /// A pin that names an account this device does not hold is not silently ignored —
+    /// falling back to the current account would sign the request as the wrong person,
+    /// which for a repo write means posting to the wrong repo.
+    private func actingAccount() async throws -> Account {
+        guard let pinnedDID = PetrelActingAccount.did else {
+            guard let current = await accountManager.getCurrentAccount() else {
+                throw AuthError.noActiveAccount as Error
+            }
+            return current
+        }
+        do {
+            if let account = try await storage.getAccount(for: pinnedDID) {
+                return account
+            }
+        } catch {
+            LogManager.logError(
+                "actingAccount: storage error for pinned DID \(LogManager.logDID(pinnedDID)): \(error)",
+                category: .authentication
+            )
+            throw AuthError.noActiveAccount as Error
+        }
+        LogManager.logError(
+            "actingAccount: no stored account for pinned DID \(LogManager.logDID(pinnedDID))",
+            category: .authentication
+        )
+        throw AuthError.noActiveAccount as Error
+    }
+
     // MARK: - Coordinator Access
 
     /// Gets or creates a token refresh coordinator scoped to a specific DID
@@ -1898,10 +1931,11 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
     /// - Parameter forceRefresh: If true, forces a refresh regardless of calculated expiry time
     /// - Returns: Result indicating whether token was refreshed, still valid, or skipped
     func refreshTokenIfNeeded(forceRefresh: Bool = false) async throws -> TokenRefreshResult {
-        // Step 1: Get current account
-        guard let account = await accountManager.getCurrentAccount() else {
-            throw AuthError.noActiveAccount
-        }
+        // Step 1: Get the account this call acts as — the pinned one if the caller bound
+        // `PetrelActingAccount.did`, else the current account. Everything below is keyed
+        // by that DID (session, circuit breaker, refresh coordinator), so pinning rotates
+        // exactly the pinned account's token and never the active account's.
+        let account = try await actingAccount()
 
         let did = account.did
 
@@ -2882,12 +2916,17 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
     /// - Parameter request: The original request to authenticate.
     /// - Returns: The request with authentication headers added.
     func prepareAuthenticatedRequest(_ request: URLRequest) async throws -> URLRequest {
-        guard let account = await accountManager.getCurrentAccount() else {
+        // Honours `PetrelActingAccount.did` when the caller pinned one, so a request
+        // made on behalf of a non-active account is signed with that account's session.
+        let account: Account
+        do {
+            account = try await actingAccount()
+        } catch {
             // Log the URL that triggered this error for easier debugging
             LogManager.logError(
-                "prepareAuthenticatedRequest: No active account for non-auth endpoint: \(request.url?.absoluteString ?? "Unknown URL")"
+                "prepareAuthenticatedRequest: No account for non-auth endpoint: \(request.url?.absoluteString ?? "Unknown URL")"
             )
-            throw AuthError.noActiveAccount as Error
+            throw error
         }
 
         // Check if session exists and handle missing session case
@@ -2993,11 +3032,14 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
     func prepareAuthenticatedRequestWithContext(_ request: URLRequest) async throws -> (
         URLRequest, AuthContext
     ) {
-        guard let account = await accountManager.getCurrentAccount() else {
+        let account: Account
+        do {
+            account = try await actingAccount()
+        } catch {
             LogManager.logError(
-                "prepareAuthenticatedRequestWithContext: No active account for non-auth endpoint: \(request.url?.absoluteString ?? "Unknown URL")"
+                "prepareAuthenticatedRequestWithContext: No account for non-auth endpoint: \(request.url?.absoluteString ?? "Unknown URL")"
             )
-            throw AuthError.noActiveAccount as Error
+            throw error
         }
 
         // Check if session exists and attempt recovery if missing
