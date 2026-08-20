@@ -281,7 +281,16 @@ actor CABOAuthStrategy: AuthStrategy {
     ) async throws -> (Data, HTTPURLResponse) {
         guard response.statusCode == 401 else { return (data, response) }
 
-        let result = try await refreshTokenIfNeeded(forceRefresh: true)
+        // The Authorization header names the exact access token that earned this
+        // 401; handing it to the refresh path lets an already-rotated session
+        // answer .stillValid instead of consuming another single-use refresh token.
+        let failedAccessToken = request.value(forHTTPHeaderField: "Authorization")
+            .flatMap { $0.split(separator: " ").last.map(String.init) }
+
+        await ensureRefreshClosure()
+        let result = try await core.refreshTokenIfNeeded(
+            forceRefresh: true, staleAccessToken: failedAccessToken
+        )
 
         switch result {
         case .refreshedSuccessfully, .stillValid:

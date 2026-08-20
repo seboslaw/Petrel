@@ -18,6 +18,39 @@ import JSONWebAlgorithms
 import JSONWebKey
 import JSONWebSignature
 
+/// Process-wide single-flight registry for refresh-token exchanges, keyed by DID
+/// and shared across every core instance in the process. Refresh tokens are
+/// single-use: a second POST of the same token reads as replay/theft to the auth
+/// server, which answers by revoking the whole token family — so at most one
+/// exchange per DID may ever be on the wire. An instance-local map cannot give
+/// that guarantee: actor reentrancy opens a window between its check and its
+/// registration, and a second client instance for the same account never shares
+/// it at all.
+actor RefreshFlightRegistry {
+    static let shared = RefreshFlightRegistry()
+
+    private var flights: [String: Task<TokenRefreshResult, Error>] = [:]
+
+    /// Runs `operation` as the single flight for `did`, or joins the flight
+    /// already in progress and returns its result. The join check and the
+    /// registration are not separated by a suspension point.
+    func run(
+        for did: String,
+        operation: @escaping @Sendable () async throws -> TokenRefreshResult
+    ) async throws -> TokenRefreshResult {
+        if let flight = flights[did] { return try await flight.value }
+        let flight = Task<TokenRefreshResult, Error> {
+            // Deregistration belongs to the flight itself, not to the caller
+            // that created it: a caller cancelled mid-await must not free the
+            // slot while the exchange is still on the wire.
+            defer { flights.removeValue(forKey: did) }
+            return try await operation()
+        }
+        flights[did] = flight
+        return try await flight.value
+    }
+}
+
 /// Shared OAuth machinery (DPoP, PKCE, nonce tracking, metadata fetching,
 /// refresh coordination with deduplication & circuit breaking).
 ///
@@ -39,7 +72,6 @@ actor OAuthCore {
     let refreshCircuitBreaker = RefreshCircuitBreaker()
     var noncesByThumbprint: [String: [String: String]] = [:]
     var usedRefreshTokens: Set<String> = []
-    var activeRefreshTasks: [String: Task<TokenRefreshResult, Error>] = [:]
     var oauthFlowNonces: [String: String] = [:]
     var ambiguousRefreshUntil: [String: Date] = [:]
     var nextRefreshResourceOverride: String?
@@ -620,15 +652,43 @@ actor OAuthCore {
     }
 
     func refreshTokenIfNeeded(forceRefresh: Bool) async throws -> TokenRefreshResult {
-        guard let account = await accountManager.getCurrentAccount(),
-              let session = await currentSession(for: account.did)
-        else {
+        try await refreshTokenIfNeeded(forceRefresh: forceRefresh, staleAccessToken: nil)
+    }
+
+    /// - Parameter staleAccessToken: when the caller is reacting to a 401, the
+    ///   access token the failed request was sent with. If a rotation has already
+    ///   replaced it, that 401 says nothing about the current session and no
+    ///   exchange is performed.
+    func refreshTokenIfNeeded(
+        forceRefresh: Bool, staleAccessToken: String?
+    ) async throws -> TokenRefreshResult {
+        guard let account = await accountManager.getCurrentAccount() else {
+            throw AuthError.noActiveAccount
+        }
+        return try await RefreshFlightRegistry.shared.run(for: account.did) { [weak self] in
+            guard let self else { throw AuthError.tokenRefreshFailed }
+            return try await self.performGuardedRefresh(
+                for: account, forceRefresh: forceRefresh, staleAccessToken: staleAccessToken
+            )
+        }
+    }
+
+    /// The single-flight body — only ever runs as the registry's one flight per DID.
+    private func performGuardedRefresh(
+        for account: Account, forceRefresh: Bool, staleAccessToken: String?
+    ) async throws -> TokenRefreshResult {
+        let did = account.did
+        guard let session = await currentSession(for: did) else {
             throw AuthError.noActiveAccount
         }
 
-        let did = account.did
-
-        if let task = activeRefreshTasks[did] { return try await task.value }
+        // A 401 earned by an access token that is no longer the current one is
+        // stale evidence: a rotation already happened between that request's
+        // preparation and now. Hand back the fresh session instead of consuming
+        // another single-use refresh token.
+        if let staleAccessToken, staleAccessToken != session.accessToken {
+            return .stillValid
+        }
 
         guard let refreshToken = session.refreshToken else { throw AuthError.tokenRefreshFailed }
         if usedRefreshTokens.contains(refreshToken) { throw AuthError.tokenRefreshFailed }
@@ -643,23 +703,17 @@ actor OAuthCore {
             throw AuthError.tokenRefreshFailed
         }
 
-        // Guard against concurrent reuse while the request is in flight. The token is
-        // only treated as permanently consumed when the server definitively used it
-        // (success, or invalid_grant); a transient failure (timeout, offline, 5xx)
-        // must NOT burn it, or every later refresh fails until app restart.
+        // Guard against reuse across flights. The token is only treated as
+        // permanently consumed when the server definitively used it (success, or
+        // invalid_grant); a transient failure (timeout, offline, 5xx) must NOT
+        // burn it, or every later refresh fails until app restart.
         if usedRefreshTokens.count > Self.usedRefreshTokenCap {
             usedRefreshTokens.removeAll()
         }
         usedRefreshTokens.insert(refreshToken)
 
-        let task = Task<TokenRefreshResult, Error> {
-            try await performRefresh(account, session)
-        }
-        activeRefreshTasks[did] = task
-        defer { activeRefreshTasks.removeValue(forKey: did) }
-
         do {
-            return try await task.value
+            return try await performRefresh(account, session)
         } catch {
             if !Self.isDefinitiveRefreshRejection(error) {
                 usedRefreshTokens.remove(refreshToken)
