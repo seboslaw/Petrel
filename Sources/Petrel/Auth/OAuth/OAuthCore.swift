@@ -229,7 +229,13 @@ actor OAuthCore {
     ) async throws -> String {
         var targetDID: String? = did
         if targetDID == nil {
-            targetDID = await accountManager.getCurrentAccount()?.did
+            // Pinned account first: a proof minted during a request made for a second
+            // account must be signed with that account's key, not the current one's.
+            if let pinned = PetrelActingAccount.did {
+                targetDID = pinned
+            } else {
+                targetDID = await accountManager.getCurrentAccount()?.did
+            }
         }
 
         let privateKey: P256.Signing.PrivateKey
@@ -585,7 +591,13 @@ actor OAuthCore {
 
         var targetDID = did
         if targetDID == nil {
-            targetDID = await accountManager.getCurrentAccount()?.did
+            // Nonces are stored per account; filing the pinned account's nonce under the
+            // current account would leave both of them fetching a fresh one every request.
+            if let pinned = PetrelActingAccount.did {
+                targetDID = pinned
+            } else {
+                targetDID = await accountManager.getCurrentAccount()?.did
+            }
         }
         guard let resolvedDID = targetDID else { return }
 
@@ -608,12 +620,34 @@ actor OAuthCore {
         }
     }
 
+    /// The account this call acts for: the one pinned by `PetrelActingAccount.did`, else the
+    /// current account.
+    ///
+    /// A pin naming an account this device does not hold throws rather than falling back —
+    /// signing as the wrong account is how a post ends up in the wrong repo, or gets sent to
+    /// a PDS that never issued the token and answers "No key matched".
+    private func actingAccount() async throws -> Account? {
+        guard let pinnedDID = PetrelActingAccount.did else {
+            return await accountManager.getCurrentAccount()
+        }
+        guard let account = try? await storage.getAccount(for: pinnedDID) else {
+            LogManager.logError(
+                "OAuthCore actingAccount: no stored account for pinned DID \(LogManager.logDID(pinnedDID))"
+            )
+            throw AuthError.noActiveAccount
+        }
+        return account
+    }
+
     func prepareAuthenticatedRequest(_ request: URLRequest) async throws -> URLRequest {
         return try await prepareAuthenticatedRequestWithContext(request).0
     }
 
     func prepareAuthenticatedRequestWithContext(_ request: URLRequest) async throws -> (URLRequest, AuthContext) {
-        guard let account = await accountManager.getCurrentAccount(),
+        // Honours `PetrelActingAccount.did` when the caller pinned one: the proof, the key
+        // and the access token then all belong to that account rather than to whichever
+        // account is current.
+        guard let account = try await actingAccount(),
               let session = try? await storage.getSession(for: account.did)
         else {
             throw AuthError.noActiveAccount
@@ -667,7 +701,10 @@ actor OAuthCore {
     func refreshTokenIfNeeded(
         forceRefresh: Bool, staleAccessToken: String?
     ) async throws -> TokenRefreshResult {
-        guard let account = await accountManager.getCurrentAccount() else {
+        // Rotates the pinned account when there is one — the single-flight registry, the
+        // session and the stored tokens below are all keyed by this DID, so a request made
+        // for a second account refreshes that account and never the active one.
+        guard let account = try await actingAccount() else {
             throw AuthError.noActiveAccount
         }
         return try await RefreshFlightRegistry.shared.run(for: account.did) { [weak self] in
