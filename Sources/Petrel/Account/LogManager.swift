@@ -229,9 +229,18 @@ public class LogManager {
     // MARK: - Structured Request/Response Logging for BFF Debugging
 
     /// Extracts JSON shape information: top-level keys and array lengths (no values)
+    ///
+    /// DEBUG only. This walks the *entire* body through `JSONSerialization`, so in a
+    /// release build it made every response pay a second full JSON parse on top of the
+    /// caller's own decode — including multi-megabyte feed responses, where it is
+    /// pure launch-time cost for a log line nobody reads in production.
     static func jsonShape(from data: Data) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return describeJSONShape(json)
+        #if DEBUG
+            guard let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
+            return describeJSONShape(json)
+        #else
+            return nil
+        #endif
     }
 
     private static func describeJSONShape(_ value: Any, depth: Int = 0) -> String {
