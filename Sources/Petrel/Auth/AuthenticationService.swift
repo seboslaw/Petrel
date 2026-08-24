@@ -2227,6 +2227,9 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
                     category: .authentication
                 )
                 LogManager.logInfo("METRIC token_refresh_success_total did=\(LogManager.logDID(account.did))")
+                #if DEBUG
+                    PetrelDebugAuth.disarmAfterRefresh()
+                #endif
                 return .refreshedSuccessfully // Indicate actual refresh happened
             }
 
@@ -3077,10 +3080,24 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
 
         var modifiedRequest = request
 
+        // Normally just `session.accessToken`. See `PetrelDebugAuth` — a DEBUG-only
+        // latch substitutes an unverifiable variant so the server-rejected-token
+        // path can be exercised on demand instead of only after a real expiry.
+        var effectiveAccessToken = session.accessToken
+        #if DEBUG
+            if PetrelDebugAuth.isArmed {
+                effectiveAccessToken = PetrelDebugAuth.invalidVariant(of: session.accessToken)
+                LogManager.logWarning(
+                    "DEBUG PetrelDebugAuth: signing \(request.url?.path ?? "request") with an invalid access token",
+                    category: .authentication
+                )
+            }
+        #endif
+
         // Handle legacy Bearer tokens differently from DPoP tokens
         if session.tokenType == .bearer {
             // Legacy authentication: just add Bearer token, no DPoP needed
-            modifiedRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+            modifiedRequest.setValue("Bearer \(effectiveAccessToken)", forHTTPHeaderField: "Authorization")
             // For legacy auth, JKT is not applicable but we still return context with DID
             let context = AuthContext(did: account.did, jkt: nil)
             return (modifiedRequest, context)
@@ -3104,13 +3121,13 @@ actor AuthenticationService: AuthServiceProtocol, AuthStrategy, AuthenticationPr
             for: method,
             url: urlString,
             type: type,
-            accessToken: isTokenEndpoint ? nil : session.accessToken,
+            accessToken: isTokenEndpoint ? nil : effectiveAccessToken,
             did: account.did
         )
 
         modifiedRequest.setValue(dpopProof, forHTTPHeaderField: "DPoP")
         if !isTokenEndpoint {
-            modifiedRequest.setValue("DPoP \(session.accessToken)", forHTTPHeaderField: "Authorization")
+            modifiedRequest.setValue("DPoP \(effectiveAccessToken)", forHTTPHeaderField: "Authorization")
         }
 
         let context = AuthContext(did: account.did, jkt: thumbprint)
