@@ -1053,18 +1053,34 @@ actor OAuthCore {
         let isTokenEndpoint = account.authorizationServerMetadata?.tokenEndpoint == request.url?.absoluteString
         let type: DPoPProofType = isTokenEndpoint ? .tokenRequest : .resourceAccess
 
+        // Normally just `session.accessToken`. See `PetrelDebugAuth` — a DEBUG-only
+        // latch substitutes an unverifiable variant so the server-rejected-token
+        // path can be exercised on demand instead of only after a real expiry.
+        // The proof's `ath` must bind the SAME value the header carries, so the
+        // server answers invalid_token rather than rejecting the proof.
+        var effectiveAccessToken = session.accessToken
+        #if DEBUG
+            if PetrelDebugAuth.isArmed {
+                effectiveAccessToken = PetrelDebugAuth.invalidVariant(of: session.accessToken)
+                LogManager.logWarning(
+                    "DEBUG PetrelDebugAuth: signing \(request.url?.path ?? "request") with an invalid access token",
+                    category: .authentication
+                )
+            }
+        #endif
+
         // Generate DPoP and obtain its thumbprint atomically from the same material
         let (proof, thumbprint) = try await createDPoPProofWithMaterial(
             for: request.httpMethod ?? "GET",
             url: request.url?.absoluteString ?? "",
             type: type,
-            accessToken: isTokenEndpoint ? nil : session.accessToken,
+            accessToken: isTokenEndpoint ? nil : effectiveAccessToken,
             did: account.did
         )
         req.setValue(proof, forHTTPHeaderField: "DPoP")
 
         if !isTokenEndpoint {
-            req.setValue("DPoP \(session.accessToken)", forHTTPHeaderField: "Authorization")
+            req.setValue("DPoP \(effectiveAccessToken)", forHTTPHeaderField: "Authorization")
         }
 
         return (req, AuthContext(did: account.did, jkt: thumbprint))
@@ -1120,7 +1136,16 @@ actor OAuthCore {
         // stale evidence: a rotation already happened between that request's
         // preparation and now. Hand back the fresh session instead of consuming
         // another single-use refresh token.
-        if let staleAccessToken, staleAccessToken != session.accessToken {
+        //
+        // Exception: while `PetrelDebugAuth` is armed, requests are deliberately
+        // signed with a corrupted variant of the stored token — which would read
+        // as "already rotated" here and dodge the very refresh the simulation
+        // exists to exercise. Fall through to the real exchange instead.
+        var debugAuthArmed = false
+        #if DEBUG
+            debugAuthArmed = PetrelDebugAuth.isArmed
+        #endif
+        if let staleAccessToken, staleAccessToken != session.accessToken, !debugAuthArmed {
             LogManager.logError(
                 "ROTATION_TRACE stale-401 short-circuit: access token already rotated — no exchange did=\(LogManager.logDID(did))"
             )
@@ -1150,7 +1175,13 @@ actor OAuthCore {
         usedRefreshTokens.insert(refreshToken)
 
         do {
-            return try await performRefresh(account, session)
+            let result = try await performRefresh(account, session)
+            #if DEBUG
+                if result == .refreshedSuccessfully {
+                    PetrelDebugAuth.disarmAfterRefresh()
+                }
+            #endif
+            return result
         } catch {
             if !Self.isDefinitiveRefreshRejection(error) {
                 usedRefreshTokens.remove(refreshToken)
