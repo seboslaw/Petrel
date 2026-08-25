@@ -27,11 +27,13 @@
             let update: (CFDictionary, CFDictionary) -> OSStatus
             let add: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
             let delete: (CFDictionary) -> OSStatus
+            let copyMatching: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
 
             static let live = Operations(
                 update: { SecItemUpdate($0, $1) },
                 add: { SecItemAdd($0, $1) },
-                delete: { SecItemDelete($0) }
+                delete: { SecItemDelete($0) },
+                copyMatching: { SecItemCopyMatching($0, $1) }
             )
         }
 
@@ -99,7 +101,8 @@
                 searchQuery as CFDictionary, updateAttributes as CFDictionary
             )
             if updateStatus == errSecSuccess {
-                LogManager.logDebug("AppleKeychainStore - Successfully updated item for key \(namespacedKey).")
+                try verifyStored(searchQuery: searchQuery, value: value, namespacedKey: namespacedKey)
+                LogManager.logDebug("AppleKeychainStore - Updated and verified item for key \(namespacedKey).")
                 return
             }
             guard updateStatus == errSecItemNotFound else {
@@ -114,7 +117,8 @@
             addQuery[kSecAttrAccessible as String] = Self.defaultAccessibility
             let addStatus = operations.add(addQuery as CFDictionary, nil)
             if addStatus == errSecSuccess {
-                LogManager.logDebug("AppleKeychainStore - Successfully stored item for key \(namespacedKey).")
+                try verifyStored(searchQuery: searchQuery, value: value, namespacedKey: namespacedKey)
+                LogManager.logDebug("AppleKeychainStore - Stored and verified item for key \(namespacedKey).")
                 return
             }
             guard addStatus == errSecDuplicateItem else {
@@ -133,9 +137,29 @@
                 )
                 throw KeychainError.itemStoreError(status: Int(retryStatus))
             }
+            try verifyStored(searchQuery: searchQuery, value: value, namespacedKey: namespacedKey)
             LogManager.logDebug(
-                "AppleKeychainStore - Updated existing item for key \(namespacedKey) after duplicate add."
+                "AppleKeychainStore - Updated and verified item for key \(namespacedKey) after duplicate add."
             )
+        }
+
+        /// Read-back verification: a write that "succeeded" into a location
+        /// subsequent reads cannot see is exactly how a session dies silently
+        /// (observed on iOS-app-on-Mac, where access-grouped items vanished
+        /// while the writes kept reporting success) — catch the lie at the
+        /// source, with the status that names the store's answer.
+        private func verifyStored(searchQuery: [String: Any], value: Data, namespacedKey: String) throws {
+            var verifyQuery = searchQuery
+            verifyQuery[kSecReturnData as String] = kCFBooleanTrue!
+            verifyQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+            var verifyItem: CFTypeRef?
+            let verifyStatus = operations.copyMatching(verifyQuery as CFDictionary, &verifyItem)
+            guard verifyStatus == errSecSuccess, (verifyItem as? Data) == value else {
+                LogManager.logError(
+                    "AppleKeychainStore - POST-STORE VERIFY FAILED for key \(namespacedKey): status=\(verifyStatus) dataMatch=\((verifyItem as? Data) == value)"
+                )
+                throw KeychainError.itemStoreError(status: Int(verifyStatus))
+            }
         }
 
         func retrieve(key: String, namespace: String, accessGroup: String?) throws -> Data {

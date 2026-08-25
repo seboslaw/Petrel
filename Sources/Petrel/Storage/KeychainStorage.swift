@@ -493,11 +493,27 @@ public actor KeychainStorage {
                 "Account+session save verification successful for DID: \(LogManager.logDID(did))"
             )
 
-            // Step 5: Cleanup temporary and backup files
+            // Step 5: Cleanup the temp copies, and bring the backups into
+            // LOCKSTEP with the just-verified data instead of deleting them.
+            // The backups used to be rollback snapshots of the PREVIOUS state,
+            // removed on success — so when a session item later vanished from
+            // the keychain (observed repeatedly on iOS-app-on-Mac), recovery
+            // could only ever find a STALE session whose single-use refresh
+            // token was already consumed; replaying it made the authorization
+            // server revoke the whole token family. A lockstep shadow turns
+            // that recovery into a genuine rescue; rollback semantics during a
+            // write are unchanged, and deleteSession removes the shadow on
+            // logout as before.
             try? KeychainManager.delete(key: tempAccountKey, namespace: namespace, accessGroup: accessGroup)
             try? KeychainManager.delete(key: tempSessionKey, namespace: namespace, accessGroup: accessGroup)
-            try? KeychainManager.delete(key: backupAccountKey, namespace: namespace, accessGroup: accessGroup)
-            try? KeychainManager.delete(key: backupSessionKey, namespace: namespace, accessGroup: accessGroup)
+            do {
+                try KeychainManager.store(key: backupAccountKey, value: accountData, namespace: namespace, accessGroup: accessGroup)
+                try KeychainManager.store(key: backupSessionKey, value: sessionData, namespace: namespace, accessGroup: accessGroup)
+            } catch {
+                LogManager.logWarning(
+                    "Failed to update lockstep account/session backup for DID: \(LogManager.logDID(did)): \(error)"
+                )
+            }
 
             LogManager.logDebug(
                 "Account+session saved atomically and verified for DID: \(LogManager.logDID(did))"
@@ -1208,9 +1224,20 @@ public actor KeychainStorage {
                 throw SessionSaveError.verificationFailed("Could not verify saved session: \(error)")
             }
 
-            // Step 5: Cleanup temporary files
+            // Step 5: Cleanup the temp copy, and bring the backup into LOCKSTEP
+            // with the just-verified session instead of deleting it — see the
+            // matching comment in saveAccountAndSession: a stale rollback
+            // snapshot is worse than none under single-use token rotation,
+            // while a current shadow makes recovery from silent item loss a
+            // genuine rescue.
             try? KeychainManager.delete(key: tempKey, namespace: namespace, accessGroup: accessGroup)
-            try? KeychainManager.delete(key: backupKey, namespace: namespace, accessGroup: accessGroup)
+            do {
+                try KeychainManager.store(key: backupKey, value: data, namespace: namespace, accessGroup: accessGroup)
+            } catch {
+                LogManager.logWarning(
+                    "Failed to update lockstep session backup for DID: \(LogManager.logDID(did)): \(error)"
+                )
+            }
             LogManager.logDebug(
                 "Session saved atomically and verified for DID: \(LogManager.logDID(did))"
             )
@@ -1244,9 +1271,11 @@ public actor KeychainStorage {
     ) async {
         switch error {
         case .temporarySaveFailed:
-            // If we can't even save to temp, just cleanup and fail
+            // If we can't even save to temp, just cleanup and fail. The backup is
+            // NOT deleted: under lockstep semantics it shadows the intact primary,
+            // and a transient temp-write hiccup must not destroy the one copy that
+            // rescues a later silent primary loss.
             try? KeychainManager.delete(key: tempKey, namespace: namespace, accessGroup: accessGroup)
-            try? KeychainManager.delete(key: backupKey, namespace: namespace, accessGroup: accessGroup)
 
         case .finalSaveFailed, .verificationFailed, .unexpectedError:
             // For final save or verification failures, attempt recovery from backup
