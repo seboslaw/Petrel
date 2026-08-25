@@ -711,10 +711,53 @@ actor CABOAuthStrategy: AuthStrategy {
            let errorResponse = try? JSONCoders.decode(OAuthErrorResponse.self, from: data),
            errorResponse.error == "invalid_grant"
         {
+            // Rescue: if storage now holds a DIFFERENT refresh token than the one
+            // this attempt used, another process won a concurrent rotation — the
+            // session is alive and the invalid_grant only condemns our stale copy.
+            // Report health, not death.
+            if let stored = try? await core.storage.getSession(for: account.did),
+               let storedRefresh = stored.refreshToken,
+               storedRefresh != session.refreshToken
+            {
+                LogManager.logError(
+                    "ROTATION_TRACE rescue: invalid_grant on a stale token but storage holds a newer session — stillValid did=\(LogManager.logDID(account.did))"
+                )
+                await core.refreshCircuitBreaker.recordSuccess(for: account.did)
+                return .stillValid
+            }
+
             LogManager.logError(
                 "Token refresh definitively rejected (invalid_grant) for DID: \(LogManager.logDID(account.did))"
             )
             await core.refreshCircuitBreaker.recordFailure(for: account.did, kind: .invalidGrant)
+
+            // Truthful death: the family is dead server-side — leave local storage
+            // agreeing with the event so every storage-based check reaches the same
+            // verdict. Same steps as logout() minus the pointless revocation of a
+            // dead token; the account record survives for login prefill, only the
+            // pointer clears.
+            try? await core.storage.deleteSession(for: account.did)
+            try? await core.storage.deleteDPoPKey(for: account.did)
+            await core.clearDPoPKeyCache(for: account.did)
+            try? await core.storage.saveDPoPNonces([:], for: account.did)
+            try? await core.storage.saveDPoPNoncesByJKT([:], for: account.did)
+            await core.clearNonceCache(for: account.did)
+            await core.accountManager.clearCurrentAccount()
+            LogManager.logError(
+                "AUTH_LOGOUT did=\(LogManager.logDID(account.did)) reason=invalid_grant"
+            )
+            // The one definitive death signal (-> the refreshTokenInvalid event):
+            // emitted exactly when the server rejected the grant and local state
+            // has been cleaned to match. The UI must not learn "death" from
+            // anywhere else.
+            LogManager.logAuthIncident(
+                "RefreshInvalidGrant",
+                details: [
+                    "did": account.did,
+                    "status": response.statusCode,
+                    "error": errorResponse.error,
+                ]
+            )
             throw AuthError.invalidCredentials
         }
 

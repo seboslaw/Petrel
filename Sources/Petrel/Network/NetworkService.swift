@@ -1504,11 +1504,14 @@ public actor NetworkService: NetworkServiceProtocol {
                             LogManager.logError(
                                 "Network Service - authProvider failed to handle non-nonce 401: \(error). Giving up."
                             )
-                            let autoLogoutDID = authCtx?.did ?? ""
-                            // Broadcast auto-logout event so UI can redirect to reauth
-                            Task {
-                                await AuthEventBroadcaster.shared.broadcast(.autoLogoutTriggered(did: autoLogoutDID, reason: "401_token_refresh_failed"))
-                            }
+                            // NO auto-logout broadcast here: this catch also fires for
+                            // plain network errors during the refresh, rate-limit
+                            // skips and an open circuit breaker — none of which mean
+                            // the session is dead. The DEFINITIVE verdict is emitted
+                            // by the auth strategy itself (RefreshInvalidGrant → the
+                            // refreshTokenInvalid event) exactly when the server
+                            // rejects the grant; the UI must not learn "death" from
+                            // anywhere else.
                             throw NetworkError.authenticationRequired // Throw if handling fails
                         }
                     } else {
@@ -1516,11 +1519,10 @@ public actor NetworkService: NetworkServiceProtocol {
                         LogManager.logError(
                             "Network Service - Received non-nonce 401 but skipping refresh for \(url.absoluteString). Cannot proceed."
                         )
-                        let autoLogoutDID = authCtx?.did ?? ""
-                        // Broadcast auto-logout event so UI can redirect to reauth
-                        Task {
-                            await AuthEventBroadcaster.shared.broadcast(.autoLogoutTriggered(did: autoLogoutDID, reason: "401_skip_refresh"))
-                        }
+                        // No auto-logout broadcast: with skipTokenRefresh the caller
+                        // (e.g. a no-rotation push extension riding a stored access
+                        // token) EXPECTS auth failures on a stale token; they are
+                        // degradation, not death.
                         throw NetworkError.authenticationRequired // Cannot handle this 401
                     }
                 // Handle 400 responses - check for ExpiredToken error which needs token refresh

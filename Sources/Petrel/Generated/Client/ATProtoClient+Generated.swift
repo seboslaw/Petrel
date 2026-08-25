@@ -329,6 +329,13 @@ public actor ATProtoClient {
         }
     }
 
+    /// Awaitable variant of `applicationDidBecomeActive()` for callers that read
+    /// auth state right after the validation — the fire-and-forget original
+    /// races its own verdict.
+    public func applicationDidBecomeActiveAndWait() async {
+        await validateAuthenticationState()
+    }
+
     // MARK: - Service Configuration
 
     /// Sets the service DID for a given namespace.
