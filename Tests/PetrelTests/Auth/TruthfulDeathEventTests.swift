@@ -118,13 +118,16 @@ private func withCABTransport<T>(
     try await withSerializedStorageOverrideTest {
         KeychainManager._setStorageOverride(backend)
         TruthfulDeathURLProtocol.setHandler(handler)
-        NetworkService.setNetworkTestProtocolClasses([TruthfulDeathURLProtocol.self])
         defer {
-            NetworkService.setNetworkTestProtocolClasses(nil)
             TruthfulDeathURLProtocol.setHandler(nil)
             KeychainManager._setStorageOverride(nil)
         }
-        return try await body()
+        // Task-scoped: cannot be clobbered by suites that mutate the global slot.
+        return try await NetworkService.$taskLocalTestProtocolClasses.withValue(
+            .init(classes: [TruthfulDeathURLProtocol.self])
+        ) {
+            try await body()
+        }
     }
 }
 
@@ -199,10 +202,13 @@ struct TruthfulDeathEventTests {
                 P256.Signing.PrivateKey().x963Representation, for: did
             )
 
+            // Captured at the emission site: the broadcaster's observer list is
+            // process-global and other suites clear it wholesale mid-run.
             let events = Mutex<[AuthEvent]>([])
-            await PetrelAuthEvents.addObserverAndWait { event in
+            LogManager.setOnAuthEventForTesting { event in
                 events.withLock { $0.append(event) }
             }
+            defer { LogManager.setOnAuthEventForTesting(nil) }
 
             var thrown: Error?
             do {
@@ -222,7 +228,6 @@ struct TruthfulDeathEventTests {
             #expect(await accountManager.clearCurrentAccountCalls == 1)
 
             // Exactly one truthful death event, for this DID.
-            await PetrelAuthEvents.drain()
             let deathEvents = events.withLock { $0 }.filter {
                 if case let .refreshTokenInvalid(eventDID, statusCode, error) = $0 {
                     return eventDID == did && statusCode == 400 && error == "invalid_grant"
@@ -230,7 +235,6 @@ struct TruthfulDeathEventTests {
                 return false
             }
             #expect(deathEvents.count == 1, "The genuine rejection must emit the refreshTokenInvalid event")
-            await PetrelAuthEvents.removeAllObservers()
         }
     }
 
@@ -303,9 +307,10 @@ struct TruthfulDeathEventTests {
             )
 
             let events = Mutex<[AuthEvent]>([])
-            await PetrelAuthEvents.addObserverAndWait { event in
+            LogManager.setOnAuthEventForTesting { event in
                 events.withLock { $0.append(event) }
             }
+            defer { LogManager.setOnAuthEventForTesting(nil) }
 
             let result = try await strategy.refreshTokenIfNeeded(forceRefresh: true)
             #expect(result == .stillValid, "The session is alive — only our stale copy was condemned")
@@ -317,13 +322,11 @@ struct TruthfulDeathEventTests {
             #expect(key != nil)
             #expect(await accountManager.clearCurrentAccountCalls == 0)
 
-            await PetrelAuthEvents.drain()
             let deathEvents = events.withLock { $0 }.filter {
                 if case let .refreshTokenInvalid(eventDID, _, _) = $0 { return eventDID == did }
                 return false
             }
             #expect(deathEvents.isEmpty, "A rescued race must not reach the UI as a death")
-            await PetrelAuthEvents.removeAllObservers()
         }
     }
 }

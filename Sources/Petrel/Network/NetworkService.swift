@@ -453,6 +453,28 @@ public actor NetworkService: NetworkServiceProtocol {
                 networkTestProtocolClasses = classes
             }
         }
+
+        /// Task-scoped variant of the test transport override. The global setter
+        /// above is one process-wide slot: two suites installing different
+        /// URLProtocols race each other, and a clear from one strands the other
+        /// mid-test. A binding of this task-local wins over the global for every
+        /// NetworkService constructed inside it (including ones built internally
+        /// by ATProtoClient), is invisible to other tasks, and cannot be
+        /// clobbered from outside.
+        struct TestProtocolClasses: @unchecked Sendable {
+            let classes: [AnyClass]
+        }
+
+        @TaskLocal static var taskLocalTestProtocolClasses: TestProtocolClasses?
+
+        static func currentTestProtocolClasses() -> [AnyClass]? {
+            if let bound = taskLocalTestProtocolClasses {
+                return bound.classes
+            }
+            return networkTestProtocolClassesLock.withLock {
+                networkTestProtocolClasses
+            }
+        }
     #endif
 
     /// When true, all xrpc requests require auth and go through the gateway
@@ -738,9 +760,7 @@ public actor NetworkService: NetworkServiceProtocol {
 
         config.httpMaximumConnectionsPerHost = 5
         #if DEBUG
-            config.protocolClasses = Self.networkTestProtocolClassesLock.withLock {
-                Self.networkTestProtocolClasses
-            }
+            config.protocolClasses = Self.currentTestProtocolClasses()
         #endif
 
         // Create a session with a delegate for enhanced security
@@ -756,9 +776,7 @@ public actor NetworkService: NetworkServiceProtocol {
         exactConfig.urlCache = nil
         exactConfig.httpMaximumConnectionsPerHost = 1
         #if DEBUG
-            exactConfig.protocolClasses = Self.networkTestProtocolClassesLock.withLock {
-                Self.networkTestProtocolClasses
-            }
+            exactConfig.protocolClasses = Self.currentTestProtocolClasses()
         #endif
         exactAuthSession = URLSession(
             configuration: exactConfig,

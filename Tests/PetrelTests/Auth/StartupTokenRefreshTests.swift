@@ -96,13 +96,16 @@ private func withStartupTransport<T>(
     try await withSerializedStorageOverrideTest {
         KeychainManager._setStorageOverride(backend)
         StartupRefreshURLProtocol.setHandler(handler)
-        NetworkService.setNetworkTestProtocolClasses([StartupRefreshURLProtocol.self])
         defer {
-            NetworkService.setNetworkTestProtocolClasses(nil)
             StartupRefreshURLProtocol.setHandler(nil)
             KeychainManager._setStorageOverride(nil)
         }
-        return try await body()
+        // Task-scoped: cannot be clobbered by suites that mutate the global slot.
+        return try await NetworkService.$taskLocalTestProtocolClasses.withValue(
+            .init(classes: [StartupRefreshURLProtocol.self])
+        ) {
+            try await body()
+        }
     }
 }
 

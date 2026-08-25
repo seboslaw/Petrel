@@ -369,13 +369,16 @@ private func withStrategyTransport<T>(
     try await withSerializedStorageOverrideTest {
         KeychainManager._setStorageOverride(backend)
         SingleFlightURLProtocol.setHandler(handler)
-        NetworkService.setNetworkTestProtocolClasses([SingleFlightURLProtocol.self])
         defer {
-            NetworkService.setNetworkTestProtocolClasses(nil)
             SingleFlightURLProtocol.setHandler(nil)
             KeychainManager._setStorageOverride(nil)
         }
-        return try await body()
+        // Task-scoped: cannot be clobbered by suites that mutate the global slot.
+        return try await NetworkService.$taskLocalTestProtocolClasses.withValue(
+            .init(classes: [SingleFlightURLProtocol.self])
+        ) {
+            try await body()
+        }
     }
 }
 

@@ -237,60 +237,64 @@
             try await withSerializedStorageOverrideTest {
                 KeychainManager._setStorageOverride(backend)
                 DebugAuthURLProtocol.setHandler(handler)
-                NetworkService.setNetworkTestProtocolClasses([DebugAuthURLProtocol.self])
                 defer {
-                    NetworkService.setNetworkTestProtocolClasses(nil)
                     DebugAuthURLProtocol.setHandler(nil)
                     KeychainManager._setStorageOverride(nil)
                     PetrelDebugAuth.disarmAfterRefresh()
                 }
 
-                let storage = KeychainStorage(namespace: namespace)
-                let account = try makeAccount(did: did, withMetadata: true)
-                let networkService = NetworkService(baseURL: URL(string: pdsHost)!)
-                let strategy = PublicOAuthStrategy(
-                    storage: storage,
-                    accountManager: MockAccountManager(account: account),
-                    networkService: networkService,
-                    oauthConfig: OAuthConfig(
-                        clientId: "test-client",
-                        redirectUri: "test://callback",
-                        scope: "atproto"
-                    ),
-                    didResolver: MockDIDResolver()
-                )
-                await networkService.setAuthenticationProvider(strategy)
+                // Task-scoped transport: cannot be clobbered by suites mutating
+                // the global slot.
+                try await NetworkService.$taskLocalTestProtocolClasses.withValue(
+                    .init(classes: [DebugAuthURLProtocol.self])
+                ) {
+                    let storage = KeychainStorage(namespace: namespace)
+                    let account = try makeAccount(did: did, withMetadata: true)
+                    let networkService = NetworkService(baseURL: URL(string: pdsHost)!)
+                    let strategy = PublicOAuthStrategy(
+                        storage: storage,
+                        accountManager: MockAccountManager(account: account),
+                        networkService: networkService,
+                        oauthConfig: OAuthConfig(
+                            clientId: "test-client",
+                            redirectUri: "test://callback",
+                            scope: "atproto"
+                        ),
+                        didResolver: MockDIDResolver()
+                    )
+                    await networkService.setAuthenticationProvider(strategy)
 
-                try await storage.saveAccountAndSession(
-                    account,
-                    session: makeSession(did: did, accessToken: storedAccessToken, refreshToken: "rt-1"),
-                    for: did
-                )
-                try await storage.saveDPoPKeyRepresentation(
-                    P256.Signing.PrivateKey().x963Representation, for: did
-                )
+                    try await storage.saveAccountAndSession(
+                        account,
+                        session: makeSession(did: did, accessToken: storedAccessToken, refreshToken: "rt-1"),
+                        for: did
+                    )
+                    try await storage.saveDPoPKeyRepresentation(
+                        P256.Signing.PrivateKey().x963Representation, for: did
+                    )
 
-                PetrelDebugAuth.armAccessTokenRejection()
+                    PetrelDebugAuth.armAccessTokenRejection()
 
-                let request = URLRequest(url: URL(string: "\(pdsHost)/xrpc/app.bsky.actor.getProfile")!)
-                let (_, response) = try await networkService.request(request, skipTokenRefresh: false)
+                    let request = URLRequest(url: URL(string: "\(pdsHost)/xrpc/app.bsky.actor.getProfile")!)
+                    let (_, response) = try await networkService.request(request, skipTokenRefresh: false)
 
-                #expect((response as? HTTPURLResponse)?.statusCode == 200)
-                #expect(tokenEndpointHits.withLock { $0 } == 1, "Exactly one real refresh serves the rejection")
-                let authorizations = xrpcAuthorizations.withLock { $0 }
-                #expect(
-                    authorizations.first == "DPoP \(corrupted)",
-                    "The first attempt must carry the unverifiable token"
-                )
-                #expect(
-                    authorizations.last == "DPoP at-rotated",
-                    "The retry must carry the freshly rotated token, saw: \(authorizations)"
-                )
-                #expect(!PetrelDebugAuth.isArmed, "The completed refresh disarms the latch")
+                    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                    #expect(tokenEndpointHits.withLock { $0 } == 1, "Exactly one real refresh serves the rejection")
+                    let authorizations = xrpcAuthorizations.withLock { $0 }
+                    #expect(
+                        authorizations.first == "DPoP \(corrupted)",
+                        "The first attempt must carry the unverifiable token"
+                    )
+                    #expect(
+                        authorizations.last == "DPoP at-rotated",
+                        "The retry must carry the freshly rotated token, saw: \(authorizations)"
+                    )
+                    #expect(!PetrelDebugAuth.isArmed, "The completed refresh disarms the latch")
 
-                // The rotation persisted — the simulation cost one refresh, not a session.
-                let stored = try await storage.getSession(for: did)
-                #expect(stored?.refreshToken == "rt-rotated")
+                    // The rotation persisted — the simulation cost one refresh, not a session.
+                    let stored = try await storage.getSession(for: did)
+                    #expect(stored?.refreshToken == "rt-rotated")
+                }
             }
         }
     }

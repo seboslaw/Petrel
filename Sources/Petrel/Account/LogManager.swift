@@ -342,11 +342,22 @@ public class LogManager {
         broadcastAuthEvent(type: type, details: details)
     }
 
+    /// Test-only mirror of every auth-incident event, invoked synchronously at
+    /// the emission site. The broadcaster's observer list is process-global and
+    /// tests may clear it wholesale; this seam lets a test capture an emission
+    /// without depending on that list surviving.
+    private static let onAuthEventForTesting = Mutex<(@Sendable (AuthEvent) -> Void)?>(nil)
+
+    static func setOnAuthEventForTesting(_ hook: (@Sendable (AuthEvent) -> Void)?) {
+        onAuthEventForTesting.withLock { $0 = hook }
+    }
+
     /// Converts auth incident type and details into AuthEvent and broadcasts it
     private static func broadcastAuthEvent(type: String, details: [String: Any]) {
         guard let event = convertToAuthEvent(type: type, details: details) else {
             return
         }
+        onAuthEventForTesting.withLock { $0 }?(event)
         PetrelAuthEvents.broadcast(event)
     }
 

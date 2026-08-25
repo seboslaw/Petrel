@@ -200,41 +200,45 @@ struct ActingAccountPinTests {
         try await withSerializedStorageOverrideTest {
             KeychainManager._setStorageOverride(backend)
             ActingAccountURLProtocol.setHandler(handler)
-            NetworkService.setNetworkTestProtocolClasses([ActingAccountURLProtocol.self])
             defer {
-                NetworkService.setNetworkTestProtocolClasses(nil)
                 ActingAccountURLProtocol.setHandler(nil)
                 KeychainManager._setStorageOverride(nil)
             }
 
-            let storage = KeychainStorage(namespace: namespace)
-            try await seed(storage, did: didA, accessToken: "at-A", refreshToken: "rt-A")
-            try await seed(storage, did: didB, accessToken: "at-B", refreshToken: "rt-B")
-            try await storage.saveCurrentDID(didA)
+            // Task-scoped transport: cannot be clobbered by suites mutating the
+            // global slot, and it propagates into the client's own NetworkService.
+            try await NetworkService.$taskLocalTestProtocolClasses.withValue(
+                .init(classes: [ActingAccountURLProtocol.self])
+            ) {
+                let storage = KeychainStorage(namespace: namespace)
+                try await seed(storage, did: didA, accessToken: "at-A", refreshToken: "rt-A")
+                try await seed(storage, did: didB, accessToken: "at-B", refreshToken: "rt-B")
+                try await storage.saveCurrentDID(didA)
 
-            let client = try await ATProtoClient(
-                baseURL: URL(string: pdsHost)!,
-                oauthConfig: OAuthConfig(
-                    clientId: "test-client",
-                    redirectUri: "test://callback",
-                    scope: "atproto"
-                ),
-                namespace: namespace
-            )
+                let client = try await ATProtoClient(
+                    baseURL: URL(string: pdsHost)!,
+                    oauthConfig: OAuthConfig(
+                        clientId: "test-client",
+                        redirectUri: "test://callback",
+                        scope: "atproto"
+                    ),
+                    namespace: namespace
+                )
 
-            let request = URLRequest(url: URL(string: "\(pdsHost)/xrpc/com.atproto.repo.createRecord")!)
+                let request = URLRequest(url: URL(string: "\(pdsHost)/xrpc/com.atproto.repo.createRecord")!)
 
-            // The task-local must survive the whole pipeline: client extension →
-            // NetworkService → AuthManager → strategy → OAuthCore signing.
-            let (_, pinnedResponse) = try await client.performRequest(request, as: didB)
-            #expect(pinnedResponse.statusCode == 200)
+                // The task-local must survive the whole pipeline: client extension →
+                // NetworkService → AuthManager → strategy → OAuthCore signing.
+                let (_, pinnedResponse) = try await client.performRequest(request, as: didB)
+                #expect(pinnedResponse.statusCode == 200)
 
-            let (_, plainResponse) = try await client.performRequest(request, as: nil)
-            #expect(plainResponse.statusCode == 200)
+                let (_, plainResponse) = try await client.performRequest(request, as: nil)
+                #expect(plainResponse.statusCode == 200)
 
-            let seen = authorizations.withLock { $0 }
-            #expect(seen.contains("DPoP at-B"), "The pinned call must be signed as the pinned account, saw: \(seen)")
-            #expect(seen.last == "DPoP at-A", "The unpinned call signs as the current account, saw: \(seen)")
+                let seen = authorizations.withLock { $0 }
+                #expect(seen.contains("DPoP at-B"), "The pinned call must be signed as the pinned account, saw: \(seen)")
+                #expect(seen.last == "DPoP at-A", "The unpinned call signs as the current account, saw: \(seen)")
+            }
         }
     }
 }
