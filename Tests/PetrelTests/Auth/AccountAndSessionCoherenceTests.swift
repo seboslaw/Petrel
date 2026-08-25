@@ -317,7 +317,6 @@ struct AccountAndSessionCoherenceTests {
                 }
             }
 
-            let storage2Result = Mutex<String?>(nil)
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
                     let res1 = try await storage1.getGatewaySession(for: testDID)
@@ -328,15 +327,15 @@ struct AccountAndSessionCoherenceTests {
                     // While storage1 is persisting the migrated session (active claim in flight),
                     // storage2 calls getGatewaySession. It must NOT start a concurrent migration attempt.
                     let res2 = try await storage2.getGatewaySession(for: testDID)
-                    storage2Result.withLock { $0 = res2 }
+                    // While migration was in flight, storage2 saw the in-flight claim and returned nil.
+                    // (Asserted in-task: Swift 6.3 rejects sending a task-group closure that
+                    // captures a Mutex the enclosing task can still read.)
+                    #expect(res2 == nil, "Concurrent read while migration is in-flight must respect active claim and return nil")
                     storeContinue.signal()
                 }
                 try await group.waitForAll()
             }
             backend.beforeStore = nil
-
-            // While migration was in flight, storage2 saw the in-flight claim and returned nil
-            #expect(storage2Result.withLock { $0 } == nil, "Concurrent read while migration is in-flight must respect active claim and return nil")
 
             // After storage1 commits migration to per-DID storage, subsequent reads on storage2 return the migrated session
             let postMigrationRead = try await storage2.getGatewaySession(for: testDID)
