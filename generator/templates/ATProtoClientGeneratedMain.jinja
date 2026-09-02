@@ -496,6 +496,27 @@ public actor ATProtoClient {
         return try await authManager.startOAuthFlow(identifier: identifier, bskyAppViewDID: bskyAppViewDID, bskyChatDID: bskyChatDID)
     }
 
+    /// Starts the OAuth flow asking for `scope` instead of the client's own.
+    ///
+    /// A client declares its maximum scope in its metadata document and normally
+    /// requests all of it. Some grants exist only on some servers, though, and
+    /// asking a server for a scope it does not know rejects the whole sign-in —
+    /// so an app that knows the account's server can widen the request for that
+    /// account alone. The authorization server still caps what it issues at the
+    /// client metadata document, so this never grants more than was declared.
+    /// - Parameters:
+    ///   - identifier: The user identifier (handle), optional for sign-up.
+    ///   - bskyAppViewDID: Optional custom AppView DID to use for this account
+    ///   - bskyChatDID: Optional custom Chat DID to use for this account
+    ///   - scope: The scope to request. `nil` keeps the configured one.
+    /// - Returns: The authorization URL to present to the user.
+    public func startOAuthFlow(identifier: String? = nil, bskyAppViewDID: String? = nil, bskyChatDID: String? = nil, scope: String?) async throws -> URL {
+        guard let authManager else {
+            throw APIError.unauthenticatedClient("Cannot start OAuth flow on an unauthenticated client")
+        }
+        return try await authManager.startOAuthFlow(identifier: identifier, bskyAppViewDID: bskyAppViewDID, bskyChatDID: bskyChatDID, scope: scope)
+    }
+
     /// Starts the OAuth flow for authentication, returning both the authorization URL and state token.
     /// - Parameters:
     ///   - identifier: The user identifier (handle), optional for sign-up.
