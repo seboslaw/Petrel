@@ -86,23 +86,29 @@ actor CABOAuthStrategy: AuthStrategy {
     func startOAuthFlow(
         identifier: String?,
         bskyAppViewDID: String?,
-        bskyChatDID: String?
+        bskyChatDID: String?,
+        scope: String?
     ) async throws -> URL {
         try await startOAuthFlowWithState(
             identifier: identifier,
             bskyAppViewDID: bskyAppViewDID,
-            bskyChatDID: bskyChatDID
+            bskyChatDID: bskyChatDID,
+            scope: scope
         ).url
     }
 
     func startOAuthFlowWithState(
         identifier: String? = nil,
         bskyAppViewDID: String? = nil,
-        bskyChatDID: String? = nil
+        bskyChatDID: String? = nil,
+        scope: String? = nil
     ) async throws -> (url: URL, state: String) {
         await ensureRefreshClosure()
 
-        let key = identifier?.lowercased() ?? "__signup__"
+        // The scope belongs in the key: two flows for the same account asking
+        // for different grants are different flows, and returning the in-flight
+        // one would hand back an authorization request for the wrong scope.
+        let key = (identifier?.lowercased() ?? "__signup__") + "|" + (scope ?? "")
 
         if let existing = oauthStartTasks[key] {
             return try await existing.value
@@ -113,7 +119,8 @@ actor CABOAuthStrategy: AuthStrategy {
             return try await self._startOAuthFlowImpl(
                 identifier: identifier,
                 bskyAppViewDID: bskyAppViewDID,
-                bskyChatDID: bskyChatDID
+                bskyChatDID: bskyChatDID,
+                scope: scope
             )
         }
         oauthStartTasks[key] = task
@@ -357,7 +364,7 @@ actor CABOAuthStrategy: AuthStrategy {
         }
     }
 
-    private func _startOAuthFlowImpl(identifier: String?, bskyAppViewDID: String?, bskyChatDID: String?) async throws -> (url: URL, state: String) {
+    private func _startOAuthFlowImpl(identifier: String?, bskyAppViewDID: String?, bskyChatDID: String?, scope: String? = nil) async throws -> (url: URL, state: String) {
         if oauthStartInProgress {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -400,10 +407,18 @@ actor CABOAuthStrategy: AuthStrategy {
             authServerURL: authServerURL,
             state: stateToken,
             ephemeralKeyRawRepresentation: ephemeralKey.rawRepresentation,
-            additionalParameters: [
-                "client_assertion": parAssertion.clientAssertion,
-                "client_assertion_type": Self.clientAssertionTypeJWTBearer,
-            ]
+            // `additionalParameters` override the base entries, which is how a
+            // caller asks for more than the client's configured scope — the
+            // authorization server still caps it at what the client metadata
+            // document declares.
+            additionalParameters: {
+                var extra = [
+                    "client_assertion": parAssertion.clientAssertion,
+                    "client_assertion_type": Self.clientAssertionTypeJWTBearer,
+                ]
+                if let scope, !scope.isEmpty { extra["scope"] = scope }
+                return extra
+            }()
         )
 
         let oauthState = OAuthState(

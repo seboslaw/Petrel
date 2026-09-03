@@ -50,6 +50,16 @@ public protocol AuthStrategy: AuthenticationProvider, Sendable {
     /// Attempts to recover from catastrophic auth failures.
     func attemptRecoveryFromServerFailures(for did: String?) async throws
 
+    /// Starts the authorization-code flow asking for `scope` instead of the
+    /// client's configured scope. Strategies that cannot vary it per flow fall
+    /// back to the configured one.
+    func startOAuthFlow(
+        identifier: String?,
+        bskyAppViewDID: String?,
+        bskyChatDID: String?,
+        scope: String?
+    ) async throws -> URL
+
     /// Starts a progressive gateway scope upgrade flow.
     func startGatewayScopeUpgrade(
         requesting: Set<String>,
@@ -76,6 +86,19 @@ extension AuthStrategy {
     public func startOAuthFlowWithState(identifier: String? = nil, bskyAppViewDID: String? = nil, bskyChatDID: String? = nil) async throws
         -> (url: URL, state: String) {
         throw AuthError.oauthFlowStateUnavailable
+    }
+
+    /// Ignoring the requested scope is the honest default: a strategy that
+    /// cannot carry one per flow would otherwise silently look as though it had.
+    public func startOAuthFlow(
+        identifier: String? = nil,
+        bskyAppViewDID: String? = nil,
+        bskyChatDID: String? = nil,
+        scope: String?
+    ) async throws -> URL {
+        try await startOAuthFlow(
+            identifier: identifier, bskyAppViewDID: bskyAppViewDID, bskyChatDID: bskyChatDID
+        )
     }
 
     public func startGatewayScopeUpgrade(
