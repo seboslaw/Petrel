@@ -168,6 +168,15 @@ actor DIDResolutionService: DIDResolving {
                     candidateDID = nil
                 }
             }
+            if candidateDID == nil {
+                do {
+                    candidateDID = try await resolveHandleViaAppView(handle: canonicalHandle)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    candidateDID = nil
+                }
+            }
         }
         guard let did = candidateDID else {
             throw DIDResolutionError.handleCouldNotBeResolved(handle)
@@ -191,6 +200,46 @@ actor DIDResolutionService: DIDResolving {
         }
 
         cacheDID(did, for: canonicalHandle)
+        return did
+    }
+
+    /// Last resort: ask an AppView which DID serves this handle.
+    ///
+    /// The three methods above are the protocol's own — the account's server,
+    /// `/.well-known/atproto-did`, and DNS — and an account can have none of
+    /// them. Accounts on Bluesky's spaces alpha are the live case: their
+    /// handles resolve nowhere public, while an AppView that has indexed them
+    /// serves their profile by handle quite happily.
+    ///
+    /// This only supplies a *candidate*. The bidirectional check in
+    /// `resolveHandleToDID` still requires the DID document itself to claim
+    /// the handle in `alsoKnownAs`, so a wrong or hostile answer here resolves
+    /// to nothing — the AppView is a directory, never the authority.
+    ///
+    /// Deliberately plain `URLSession`: this is a third-party service, and
+    /// nothing about the signed-in account belongs in the request.
+    private func resolveHandleViaAppView(handle: String) async throws -> String? {
+        let logger = Logger(label: "com.joshlacalamito.Petrel.DIDResolution")
+        try Task.checkCancellation()
+
+        var components = URLComponents(string: "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+        components?.queryItems = [URLQueryItem(name: "actor", value: handle)]
+        guard let url = components?.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            logger.info("AppView could not name a DID for handle: \(handle)")
+            return nil
+        }
+
+        struct ProfileDID: Decodable { let did: String }
+        let did = try JSONCoders.decode(ProfileDID.self, from: data).did
+        guard did.starts(with: "did:") else { return nil }
+        logger.info("AppView named a candidate DID for handle: \(handle)")
         return did
     }
 
