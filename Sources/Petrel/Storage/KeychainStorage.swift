@@ -660,8 +660,26 @@ public actor KeychainStorage {
     }
 
     /// Saves the current DID to the keychain.
-    /// - Parameter did: The DID to save as current
+    ///
+    /// An empty DID means "no current account" and deletes the selector rather than storing zero
+    /// bytes. `AccountManager` clears the selector this way in three places — sign-out, account
+    /// removal, and switching away from the last account — and storing an empty value does not
+    /// survive a round trip: the keychain returns no `kSecValueData` for an empty item, so the
+    /// store's read-back verification compares nil against `Data()` and throws
+    /// `itemStoreError(status: 0)`. The write reports failure after "succeeding", and the previous
+    /// DID is left in place — a sign-out that does not stick, on every platform.
+    ///
+    /// Deleting is also what callers already expect: `getCurrentDID` reports a missing selector as
+    /// nil, and every reader guards on `!did.isEmpty`, so nil and "" are handled identically.
+    ///
+    /// - Parameter did: The DID to save as current, or "" to clear it.
     public func saveCurrentDID(_ did: String) async throws {
+        // Before the gate, not inside it: `deleteCurrentDID` takes the same one.
+        guard !did.isEmpty else {
+            try await deleteCurrentDID()
+            return
+        }
+
         let gate = Self.gatewayMutationCoordinator.gate(for: gatewayMutationScopeKey)
         await gate.acquire()
         defer { gate.release() }
