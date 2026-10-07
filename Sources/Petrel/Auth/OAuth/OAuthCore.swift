@@ -34,6 +34,16 @@ actor RefreshFlightRegistry {
         onJoin = hook
     }
 
+    /// Begins the background activity that spans one flight and returns the call that ends
+    /// it. Replaceable in tests, which observe the activity per DID.
+    private var beginActivity: @Sendable (String) -> @Sendable () -> Void = { did in
+        RotationActivity.begin(for: did)
+    }
+
+    func setBeginActivityForTesting(_ begin: (@Sendable (String) -> @Sendable () -> Void)?) {
+        beginActivity = begin ?? { did in RotationActivity.begin(for: did) }
+    }
+
     /// Runs `operation` as the single flight for `did`, or joins the flight
     /// already in progress and returns its result. The join check and the
     /// registration are not separated by a suspension point.
@@ -48,11 +58,17 @@ actor RefreshFlightRegistry {
             onJoin?(did)
             return try await flight.value
         }
+        // Held from before the consuming POST until the flight has saved its result or
+        // failed, so the process cannot be suspended in between: see `RotationActivity`.
+        let endActivity = beginActivity(did)
         let flight = Task<TokenRefreshResult, Error> {
             // Deregistration belongs to the flight itself, not to the caller
             // that created it: a caller cancelled mid-await must not free the
             // slot while the exchange is still on the wire.
-            defer { flights.removeValue(forKey: did) }
+            defer {
+                flights.removeValue(forKey: did)
+                endActivity()
+            }
             return try await operation()
         }
         flights[did] = flight
