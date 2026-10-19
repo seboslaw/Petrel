@@ -41,6 +41,15 @@ actor CABOAuthStrategy: AuthStrategy {
     /// Transport for backend assertion fetches — injectable for tests.
     let urlSession: URLSession
 
+    /// Pauses before each retry of an assertion fetch the backend could not
+    /// serve (5xx, 429, unreachable). Two short retries ride out a backend
+    /// restart or a dropped connection without holding a request up for long.
+    /// Retrying is always safe: nothing is consumed before the assertion exists.
+    static let defaultAssertionRetryDelays: [Duration] = [.milliseconds(500), .milliseconds(1500)]
+
+    /// The retry pauses this instance uses — injectable for tests.
+    let assertionRetryDelays: [Duration]
+
     static let clientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
     // Delegates
@@ -60,10 +69,12 @@ actor CABOAuthStrategy: AuthStrategy {
         networkService: NetworkService,
         oauthConfig: OAuthConfig,
         didResolver: DIDResolving,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = .shared,
+        assertionRetryDelays: [Duration] = CABOAuthStrategy.defaultAssertionRetryDelays
     ) {
         self.backendURL = backendURL
         self.urlSession = urlSession
+        self.assertionRetryDelays = assertionRetryDelays
         core = OAuthCore(
             storage: storage,
             accountManager: accountManager,
@@ -453,14 +464,55 @@ actor CABOAuthStrategy: AuthStrategy {
     /// Fetches a DPoP-bound client assertion for the given authorization
     /// server issuer. Retries exactly once when the backend answers
     /// 400 `use_dpop_nonce` with a `DPoP-Nonce` header.
+    /// Fetches a client assertion, retrying the failures a backend outage
+    /// produces (5xx, 429, unreachable) after each of `assertionRetryDelays`.
+    ///
+    /// Throws `ClientAssertionBackendUnavailable` once every attempt met an
+    /// outage, so callers can tell "renewal temporarily impossible, session
+    /// intact" apart from a refusal (`ClientAssertionBackendError`, never
+    /// retried) or a broken session.
     func fetchClientAssertion(
         aud: String,
         ephemeralKey: P256.Signing.PrivateKey? = nil,
         did: String? = nil
     ) async throws -> ClientAssertionResponse {
-        try await fetchClientAssertionAttempt(
-            aud: aud, ephemeralKey: ephemeralKey, did: did, nonce: nil, isRetry: false
-        )
+        var outage = ClientAssertionBackendUnavailable(statusCode: nil, transportError: nil)
+        for (attempt, pause) in ([Duration.zero] + assertionRetryDelays).enumerated() {
+            if attempt > 0 {
+                LogManager.logError(
+                    "Client assertion backend unavailable (\(outage.errorDescription ?? "-")); retry \(attempt)/\(assertionRetryDelays.count)",
+                    category: .authentication
+                )
+                try await Task.sleep(for: pause)
+            }
+            do {
+                return try await fetchClientAssertionAttempt(
+                    aud: aud, ephemeralKey: ephemeralKey, did: did, nonce: nil, isRetry: false
+                )
+            } catch let refusal as ClientAssertionBackendError where Self.isOutageStatus(refusal.statusCode) {
+                outage = ClientAssertionBackendUnavailable(statusCode: refusal.statusCode, transportError: nil)
+            } catch let transport as URLError where Self.isOutageTransportError(transport.code) {
+                outage = ClientAssertionBackendUnavailable(statusCode: nil, transportError: transport.code)
+            }
+        }
+        throw outage
+    }
+
+    /// Statuses that mean the backend can't serve right now, not that it refuses.
+    static func isOutageStatus(_ statusCode: Int) -> Bool {
+        statusCode == 429 || (500 ... 599).contains(statusCode)
+    }
+
+    /// Transport failures that mean the backend could not be reached.
+    static func isOutageTransportError(_ code: URLError.Code) -> Bool {
+        switch code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .notConnectedToInternet, .secureConnectionFailed,
+             .badServerResponse, .cannotLoadFromNetwork:
+            return true
+        default:
+            return false
+        }
     }
 
     private func fetchClientAssertionAttempt(

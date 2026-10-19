@@ -87,7 +87,9 @@ struct ClientAssertionFetchTests {
         return URLSession(configuration: config)
     }
 
-    private func makeStrategy(namespace: String, session: URLSession) -> CABOAuthStrategy {
+    /// Retries happen without pauses here, so the suite stays fast; the delay
+    /// values themselves are configuration, not behaviour under test.
+    private func makeStrategy(namespace: String, session: URLSession, retryDelays: [Duration] = []) -> CABOAuthStrategy {
         CABOAuthStrategy(
             backendURL: URL(string: "https://cab.example.com")!,
             storage: KeychainStorage(namespace: namespace),
@@ -105,9 +107,23 @@ struct ClientAssertionFetchTests {
                 scope: "atproto"
             ),
             didResolver: MockDIDResolver(),
-            urlSession: session
+            urlSession: session,
+            assertionRetryDelays: retryDelays
         )
     }
+
+    private static func response(_ request: URLRequest, status: Int, body: String) -> (HTTPURLResponse, Data) {
+        (
+            HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!,
+            Data(body.utf8)
+        )
+    }
+
+    private static let assertionBody = #"{"client_id":"cid","client_assertion":"a.b.c"}"#
+    private static let twoRetries: [Duration] = [.zero, .zero]
 
     @Test("Posts aud form field and DPoP proof, decodes the response")
     func fetchSendsAudAndProof() async throws {
@@ -229,5 +245,84 @@ struct ClientAssertionFetchTests {
                 ephemeralKey: P256.Signing.PrivateKey()
             )
         }
+    }
+
+    // MARK: Backend outages (2026-10-18: api.skeetsapp.com answered 502 for five
+    // hours and no session could be renewed)
+
+    @Test("A 502 is retried, and the next answer wins")
+    func badGatewayIsRetried() async throws {
+        let strategy = makeStrategy(namespace: "test.cab.retry502", session: makeMockSession(), retryDelays: Self.twoRetries)
+        let count = Mutex(0)
+        MockURLProtocol.setHandler { request in
+            let n = count.withLock { $0 += 1; return $0 }
+            return n == 1
+                ? Self.response(request, status: 502, body: "<html>Bad Gateway</html>")
+                : Self.response(request, status: 200, body: Self.assertionBody)
+        }
+        defer { MockURLProtocol.setHandler(nil) }
+
+        let response = try await strategy.fetchClientAssertion(aud: "https://auth.pds.test", ephemeralKey: P256.Signing.PrivateKey())
+        #expect(response.clientAssertion == "a.b.c")
+        #expect(count.withLock { $0 } == 2)
+    }
+
+    @Test("A backend that keeps answering 503 is reported unavailable after three attempts")
+    func persistentServerErrorIsUnavailable() async throws {
+        let strategy = makeStrategy(namespace: "test.cab.retry503", session: makeMockSession(), retryDelays: Self.twoRetries)
+        let count = Mutex(0)
+        MockURLProtocol.setHandler { request in
+            count.withLock { $0 += 1 }
+            return Self.response(request, status: 503, body: "")
+        }
+        defer { MockURLProtocol.setHandler(nil) }
+
+        await #expect(throws: ClientAssertionBackendUnavailable(statusCode: 503, transportError: nil)) {
+            _ = try await strategy.fetchClientAssertion(aud: "https://auth.pds.test", ephemeralKey: P256.Signing.PrivateKey())
+        }
+        #expect(count.withLock { $0 } == 3)
+    }
+
+    @Test("A 429 counts as unavailable too")
+    func rateLimitIsUnavailable() async throws {
+        let strategy = makeStrategy(namespace: "test.cab.retry429", session: makeMockSession(), retryDelays: [])
+        MockURLProtocol.setHandler { request in Self.response(request, status: 429, body: "") }
+        defer { MockURLProtocol.setHandler(nil) }
+
+        await #expect(throws: ClientAssertionBackendUnavailable(statusCode: 429, transportError: nil)) {
+            _ = try await strategy.fetchClientAssertion(aud: "https://auth.pds.test", ephemeralKey: P256.Signing.PrivateKey())
+        }
+    }
+
+    @Test("A definitive refusal is never retried")
+    func refusalIsNotRetried() async throws {
+        let strategy = makeStrategy(namespace: "test.cab.noretry403", session: makeMockSession(), retryDelays: Self.twoRetries)
+        let count = Mutex(0)
+        MockURLProtocol.setHandler { request in
+            count.withLock { $0 += 1 }
+            return Self.response(request, status: 403, body: #"{"error":"access_denied"}"#)
+        }
+        defer { MockURLProtocol.setHandler(nil) }
+
+        await #expect(throws: ClientAssertionBackendError(statusCode: 403, code: "access_denied")) {
+            _ = try await strategy.fetchClientAssertion(aud: "https://auth.pds.test", ephemeralKey: P256.Signing.PrivateKey())
+        }
+        #expect(count.withLock { $0 } == 1)
+    }
+
+    @Test("An unreachable backend is retried, then reported with the transport cause")
+    func unreachableBackendIsUnavailable() async throws {
+        let strategy = makeStrategy(namespace: "test.cab.unreachable", session: makeMockSession(), retryDelays: Self.twoRetries)
+        let count = Mutex(0)
+        MockURLProtocol.setHandler { _ in
+            count.withLock { $0 += 1 }
+            throw URLError(.cannotConnectToHost)
+        }
+        defer { MockURLProtocol.setHandler(nil) }
+
+        await #expect(throws: ClientAssertionBackendUnavailable(statusCode: nil, transportError: .cannotConnectToHost)) {
+            _ = try await strategy.fetchClientAssertion(aud: "https://auth.pds.test", ephemeralKey: P256.Signing.PrivateKey())
+        }
+        #expect(count.withLock { $0 } == 3)
     }
 }

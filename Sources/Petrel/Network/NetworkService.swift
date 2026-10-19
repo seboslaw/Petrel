@@ -203,6 +203,25 @@ public struct PreparedStreamingRequest: Sendable {
 }
 
 
+extension NetworkService {
+    /// What a request reports when its authentication step failed.
+    ///
+    /// A renewal the client assertion backend could not serve keeps its cause,
+    /// so apps can tell the user "still signed in, try again shortly" instead
+    /// of a generic failure that reads like a broken sign-in (2026-10-18: five
+    /// hours of "Authentication failed." while every session was intact).
+    /// Everything else reports `fallback`, as before.
+    static func authenticationFailure(_ error: Error, otherwise fallback: NetworkError) -> NetworkError {
+        if let unavailable = error as? ClientAssertionBackendUnavailable {
+            return .clientAssertionBackendUnavailable(unavailable)
+        }
+        if case let .clientAssertionBackendUnavailable(unavailable)? = error as? NetworkError {
+            return .clientAssertionBackendUnavailable(unavailable)
+        }
+        return fallback
+    }
+}
+
 public protocol AuthenticationProvider: Sendable {
     /// Prepares a request with authentication headers
     /// - Parameter request: The original request
@@ -1046,7 +1065,7 @@ public actor NetworkService: NetworkServiceProtocol {
                 if error is AuthError {
                     throw error
                 } else {
-                    throw NetworkError.authenticationFailed
+                    throw Self.authenticationFailure(error, otherwise: .authenticationFailed)
                 }
             }
         } else {
@@ -1189,7 +1208,7 @@ public actor NetworkService: NetworkServiceProtocol {
                     // Allow request to proceed without auth headers if no account exists
                 } catch {
                     LogManager.logError("Network Service - Failed to prepare authenticated request: \(error)")
-                    throw NetworkError.authenticationFailed
+                    throw Self.authenticationFailure(error, otherwise: .authenticationFailed)
                 }
             } else if requiresAuth {
                 LogManager.logError(
@@ -1530,7 +1549,7 @@ public actor NetworkService: NetworkServiceProtocol {
                             // refreshTokenInvalid event) exactly when the server
                             // rejects the grant; the UI must not learn "death" from
                             // anywhere else.
-                            throw NetworkError.authenticationRequired // Throw if handling fails
+                            throw Self.authenticationFailure(error, otherwise: .authenticationRequired)
                         }
                     } else {
                         // Is NOT a nonce error, but we are skipping token refresh (e.g., during refresh itself)
@@ -2088,7 +2107,7 @@ public actor NetworkService: NetworkServiceProtocol {
                 // Allow request to proceed without auth headers if no account exists
             } catch {
                 LogManager.logError("Failed to prepare authenticated streaming request: \(error)")
-                throw NetworkError.authenticationFailed
+                throw Self.authenticationFailure(error, otherwise: .authenticationFailed)
             }
         } else if requiresAuth {
             LogManager.logError("Authentication required but no provider set for streaming: \(finalRequest.url?.absoluteString ?? "Unknown URL")")

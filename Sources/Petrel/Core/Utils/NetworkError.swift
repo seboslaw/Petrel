@@ -27,6 +27,10 @@ public enum NetworkError: Error {
     case invalidResponse(description: String)
     case unauthorized
     case securityViolation
+    /// The session could not be renewed because the client assertion backend
+    /// is unavailable. The session itself is intact: retry later, don't sign in
+    /// again (signing in needs the same backend).
+    case clientAssertionBackendUnavailable(ClientAssertionBackendUnavailable)
 }
 
 extension NetworkError: LocalizedError {
@@ -70,6 +74,8 @@ extension NetworkError: LocalizedError {
             return "Unauthorized access."
         case .securityViolation:
             return "Network configuration issue detected. Please check your internet connection and try again."
+        case let .clientAssertionBackendUnavailable(cause):
+            return cause.errorDescription
         }
     }
 
@@ -99,6 +105,8 @@ extension NetworkError: LocalizedError {
             return "The server encountered an error."
         case .invalidResponse:
             return "The server sent a response in an unexpected format."
+        case .clientAssertionBackendUnavailable:
+            return "The service that renews the sign-in is temporarily unavailable."
         default:
             return nil
         }
@@ -124,6 +132,8 @@ extension NetworkError: LocalizedError {
             return "Please restart the app. If the problem persists, contact support."
         case .securityViolation:
             return "Try switching to a different network or disabling VPN/proxy if enabled."
+        case .clientAssertionBackendUnavailable:
+            return "You are still signed in. Try again in a few minutes; signing out and in again won't help."
         default:
             return "Please try again or contact support if the problem persists."
         }

@@ -7,6 +7,39 @@ import Testing
 
 @Suite("RefreshCircuitBreaker Tests")
 struct RefreshCircuitBreakerTests {
+    @Test("Releasing an unresolved half-open test lets the next test through")
+    func releaseUnresolvedHalfOpenTest() async {
+        let breaker = RefreshCircuitBreaker()
+        let did = "did:plc:halfopen-release"
+        for _ in 0 ..< 3 {
+            await breaker.recordFailure(for: did, kind: .network)
+        }
+        #expect(await breaker.forceHalfOpen(for: did))
+
+        #expect(await breaker.canAttemptRefresh(for: did), "the first caller takes the test slot")
+        #expect(await breaker.canAttemptRefresh(for: did) == false, "the slot is held while the test runs")
+
+        await breaker.releaseUnresolvedHalfOpenTest(for: did)
+        #expect(await breaker.canAttemptRefresh(for: did), "a released slot can be taken again")
+        #expect(await breaker.getState(for: did) == .halfOpen)
+    }
+
+    @Test("Releasing after a recorded verdict changes nothing")
+    func releaseAfterVerdictIsNoOp() async {
+        let breaker = RefreshCircuitBreaker()
+        let did = "did:plc:halfopen-verdict"
+        for _ in 0 ..< 3 {
+            await breaker.recordFailure(for: did, kind: .network)
+        }
+        _ = await breaker.forceHalfOpen(for: did)
+        _ = await breaker.canAttemptRefresh(for: did)
+        await breaker.recordFailure(for: did, kind: .network)
+
+        await breaker.releaseUnresolvedHalfOpenTest(for: did)
+        #expect(await breaker.getState(for: did) == .open)
+        #expect(await breaker.canAttemptRefresh(for: did) == false, "a failed test re-opens the circuit and its backoff applies")
+    }
+
     @Test("Reset for DID clears failure tracking and allows refresh")
     func resetForDIDAllowsRefresh() async {
         let breaker = RefreshCircuitBreaker()

@@ -255,6 +255,21 @@ actor RefreshCircuitBreaker {
         return true
     }
 
+    /// Frees the half-open test slot when the attempt that took it ended
+    /// without recording a verdict — the token turned out to be still valid,
+    /// or the refresh failed before reaching the authorization server (an
+    /// unavailable client assertion backend). Without this the slot stays
+    /// taken, `canAttemptRefresh` answers false for good, and no refresh can
+    /// happen until the process restarts. A recorded success or failure has
+    /// already left half-open, so this changes nothing after one.
+    func releaseUnresolvedHalfOpenTest(for did: String) {
+        guard var info = failureTracking[did], info.state == .halfOpen, info.halfOpenTestInProgress else {
+            return
+        }
+        info.halfOpenTestInProgress = false
+        failureTracking[did] = info
+    }
+
     /// Resets all circuit breakers
     func resetAll() {
         let count = failureTracking.count

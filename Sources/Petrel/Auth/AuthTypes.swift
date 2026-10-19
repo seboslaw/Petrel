@@ -61,6 +61,35 @@ public struct ClientAssertionBackendError: Error, LocalizedError, Sendable, Equa
     }
 }
 
+/// The client assertion backend could not produce an assertion right now: it
+/// answered 5xx or 429, or could not be reached, on every attempt
+/// `CABOAuthStrategy.fetchClientAssertion` made.
+///
+/// Nothing reached the authorization server, so the session and its refresh
+/// token are untouched and a later attempt can succeed. Signing in again does
+/// not help: it needs the same backend. Unlike `ClientAssertionBackendError`,
+/// which is a definitive refusal that retrying won't change.
+public struct ClientAssertionBackendUnavailable: Error, LocalizedError, Sendable, Equatable {
+    /// The last HTTP status the backend answered with, or nil when it could not
+    /// be reached at all.
+    public let statusCode: Int?
+    /// Why the backend could not be reached, when it couldn't. `.notConnectedToInternet`
+    /// means the device is offline rather than the backend being down.
+    public let transportError: URLError.Code?
+
+    public init(statusCode: Int?, transportError: URLError.Code?) {
+        self.statusCode = statusCode
+        self.transportError = transportError
+    }
+
+    public var errorDescription: String? {
+        if let statusCode {
+            return "The client assertion backend is unavailable (HTTP \(statusCode))."
+        }
+        return "The client assertion backend could not be reached."
+    }
+}
+
 /// Errors that can occur during authentication.
 public enum AuthError: Error, LocalizedError, Equatable {
     case noActiveAccount

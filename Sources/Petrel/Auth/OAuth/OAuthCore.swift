@@ -1171,13 +1171,16 @@ actor OAuthCore {
         guard let refreshToken = session.refreshToken else { throw AuthError.tokenRefreshFailed }
         if usedRefreshTokens.contains(refreshToken) { throw AuthError.tokenRefreshFailed }
 
+        // A token that doesn't need renewing never waits on the circuit breaker:
+        // an open circuit must not fail requests the current token can serve,
+        // and a still-valid answer must not take the half-open test slot.
+        if !forceRefresh && !session.isExpiringSoon { return .stillValid }
+
         // Circuit breaker check
         guard await refreshCircuitBreaker.canAttemptRefresh(for: did) else { throw AuthError.tokenRefreshFailed }
 
-        // Check expiry
-        if !forceRefresh && !session.isExpiringSoon { return .stillValid }
-
         guard let performRefresh = performActualRefresh else {
+            await refreshCircuitBreaker.releaseUnresolvedHalfOpenTest(for: did)
             throw AuthError.tokenRefreshFailed
         }
 
@@ -1190,8 +1193,14 @@ actor OAuthCore {
         }
         usedRefreshTokens.insert(refreshToken)
 
+        // The strategy records a success or failure with the breaker when the
+        // authorization server answered. When it didn't (the rescue paths answer
+        // .stillValid; an unavailable client assertion backend fails before the
+        // exchange) nothing is recorded, and a half-open test slot this attempt
+        // took would stay taken for good: free it either way.
         do {
             let result = try await performRefresh(account, session)
+            await refreshCircuitBreaker.releaseUnresolvedHalfOpenTest(for: did)
             #if DEBUG
                 if result == .refreshedSuccessfully {
                     PetrelDebugAuth.disarmAfterRefresh()
@@ -1199,6 +1208,7 @@ actor OAuthCore {
             #endif
             return result
         } catch {
+            await refreshCircuitBreaker.releaseUnresolvedHalfOpenTest(for: did)
             if !Self.isDefinitiveRefreshRejection(error) {
                 usedRefreshTokens.remove(refreshToken)
             }
